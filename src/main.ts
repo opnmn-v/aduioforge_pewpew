@@ -601,6 +601,7 @@ async function startOwlbear() {
     await saveLibrary(library);
   }
   selectedFolder = library.folders[0]?.id || "";
+  render();
   const access = await syncAccess();
   OBR.player.onChange(player => { role = player.role; render(); });
   OBR.broadcast.onMessage(CHANNEL, ({ data, connectionId }) => {
@@ -630,5 +631,21 @@ if (new URLSearchParams(location.search).has("preview")) {
   ];
   render();
 } else {
-  OBR.onReady(() => void startOwlbear());
+  const status = app.querySelector<HTMLElement>('[role="status"]');
+  if (status) status.textContent = "Connecting to Owlbear Rodeo…";
+  const waiting = window.setTimeout(() => {
+    if (status?.isConnected) status.textContent = "Still waiting for Owlbear Rodeo. Open this extension from your room, or reload it. Check the browser console if this continues.";
+  }, 10000);
+  OBR.onReady(() => {
+    window.clearTimeout(waiting);
+    if (status) status.textContent = "Loading your sound library…";
+    void startOwlbear().catch(error => {
+      console.error("Ambient Forge initialization failed", error);
+      const message = document.createElement("p");
+      message.setAttribute("role", "alert");
+      message.style.cssText = "padding:20px;color:#fff;background:#652d3c";
+      message.textContent = "Could not connect Ambient Forge: " + (error instanceof Error ? error.message : String(error)) + ". Reload the extension to retry.";
+      app.prepend(message);
+    });
+  });
 }
