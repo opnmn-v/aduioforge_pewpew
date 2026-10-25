@@ -4,17 +4,17 @@
 
 Ambient Forge is an open-source sound scene mixer for [Owlbear Rodeo](https://www.owlbear.rodeo/). Build layered scenes from music, ambience, voices, and effects, then keep playback synchronized with everyone at your table.
 
-Review build: **0.1.11** — playback lifecycle fixes, random launch, status feedback, and buffered seamless loops. See `AUDIT_RU.md` and `INSTALL_RU.md`. This build has not been deployed to the upstream manifest URL.
+Review build: **0.1.11** — playback lifecycle fixes, random launch, status feedback, and buffered seamless loops. See `AUDIT_RU.md` and `INSTALL_RU.md`.
 
 ## Install
 
-Add this manifest URL as a custom Owlbear Rodeo extension:
+This fork is maintained by [opnmn-v](https://github.com/opnmn-v) and hosted on GitHub Pages. In Owlbear Rodeo, open Extensions, choose to add a custom extension, and paste this manifest URL:
 
 ```text
-https://ambient-forge.marevo.workers.dev/manifest.json
+https://opnmn-v.github.io/aduioforge_pewpew/manifest.json
 ```
 
-Learn more at [ambient-forge.marevo.workers.dev/about](https://ambient-forge.marevo.workers.dev/about).
+The Pages deployment must serve the extension's `manifest.json` at that address, with application and asset URLs configured for the `/aduioforge_pewpew/` path. Publishing the repository's README alone does not install the extension.
 
 ## Features
 
@@ -55,8 +55,8 @@ Ambient Forge stores your sound library locally in the browser. Use **Export** t
 
 ## Support and contributions
 
-Report bugs or suggest features in [GitHub Issues](https://github.com/marevoteam-wq/ambient-forge/issues). Pull requests are welcome.
+Report bugs or suggest features for this fork in [GitHub Issues](https://github.com/opnmn-v/aduioforge_pewpew/issues). Pull requests are welcome.
 
 ## License
 
-Ambient Forge is maintained by **Marevo** and released under the [MIT License](LICENSE).
+This fork is maintained by **opnmn-v**. The original Ambient Forge project is by **Marevo** and released under the [MIT License](LICENSE); the original copyright notice is preserved.

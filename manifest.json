@@ -1,0 +1,16 @@
+{
+  "name": "Ambient Forge — opnmn-v",
+  "version": "0.1.11",
+  "manifest_version": 1,
+  "author": "opnmn-v",
+  "description": "Sound scene mixer for Owlbear Rodeo. Fork of Ambient Forge by Marevo.",
+  "icon": "/aduioforge_pewpew/icon.svg",
+  "background_url": "/aduioforge_pewpew/background.html",
+  "action": {
+    "title": "Ambient Forge",
+    "icon": "/aduioforge_pewpew/icon.svg",
+    "popover": "/aduioforge_pewpew/index.html",
+    "height": 640,
+    "width": 440
+  }
+}
