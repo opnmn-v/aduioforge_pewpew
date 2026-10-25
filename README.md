@@ -16,6 +16,10 @@ https://opnmn-v.github.io/aduioforge_pewpew/manifest.json
 
 The Pages deployment must serve the extension's `manifest.json` at that address, with application and asset URLs configured for the `/aduioforge_pewpew/` path. Publishing the repository's README alone does not install the extension.
 
+## GitHub Pages deployment
+
+The `Deploy GitHub Pages` workflow tests and builds the app, then publishes `dist`. In repository Settings → Pages, set Source to **GitHub Actions**. Pushes to `main` deploy automatically; the workflow can also be run from the Actions tab.
+
 ## Features
 
 - Layer multiple tracks in a single sound scene.
@@ -41,7 +45,7 @@ npm install
 npm run dev
 ```
 
-Add `http://localhost:5173/manifest.json` as a custom extension. For a standalone visual preview, open `http://localhost:5173/?preview=1`.
+Add `http://localhost:5173/aduioforge_pewpew/manifest.json` as a custom extension. For a standalone visual preview, open `http://localhost:5173/aduioforge_pewpew/?preview=1`.
 
 Create a production build with:
 

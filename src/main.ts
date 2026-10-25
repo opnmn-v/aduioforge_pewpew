@@ -228,7 +228,7 @@ function render() {
   app.innerHTML = `
     <div class="shell">
       <header class="topbar">
-        <div class="brand"><img src="/icon.svg"><div><strong>Ambient Forge</strong><span>${isGm ? "Game Master panel" : "Player audio"}</span></div></div>
+        <div class="brand"><img src="${new URL("icon.svg", document.baseURI).href}"><div><strong>Ambient Forge</strong><span>${isGm ? "Game Master panel" : "Player audio"}</span></div></div>
         <div class="transport">
           ${isGm ? `<button class="icon-btn" id="pause" title="Pause / resume all" ${playback.active.length ? "" : "disabled"}>${playback.status === "paused" ? "▶" : pauseIcon}</button><button class="icon-btn danger" id="stop-all" title="Stop all" ${playback.active.length ? "" : "disabled"}><span class="stop-icon"></span></button>` : ""}
           <button class="unlock ${audioEnabled ? "ok" : ""}" id="unlock">${audioEnabled ? "✓ Audio enabled" : "▶ Enable audio"}</button>

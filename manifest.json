@@ -1,16 +1,23 @@
 {
   "name": "Ambient Forge — opnmn-v",
+  "description": "Synchronized music and ambience mixer for Owlbear Rodeo",
   "version": "0.1.11",
   "manifest_version": 1,
   "author": "opnmn-v",
-  "description": "Sound scene mixer for Owlbear Rodeo. Fork of Ambient Forge by Marevo.",
+  "homepage_url": "https://github.com/opnmn-v/aduioforge_pewpew",
   "icon": "/aduioforge_pewpew/icon.svg",
+  "permissions": [
+    {
+      "name": "autoplay",
+      "reason": "Play synchronized music and ambience selected by the game master"
+    }
+  ],
   "background_url": "/aduioforge_pewpew/background.html",
   "action": {
     "title": "Ambient Forge",
-    "icon": "/aduioforge_pewpew/icon.svg",
-    "popover": "/aduioforge_pewpew/index.html",
-    "height": 640,
-    "width": 440
+    "icon": "/aduioforge_pewpew/toolbar-logo-v2.svg",
+    "popover": "/aduioforge_pewpew/",
+    "width": 720,
+    "height": 700
   }
 }
