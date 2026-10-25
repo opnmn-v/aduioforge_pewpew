@@ -1,7 +1,7 @@
 ﻿import { defineConfig } from "vite";
 
 export default defineConfig({
-  base: "/aduioforge_pewpew/",
+  base: "/aduioforge_pewpew/dist/",
   server: {
     cors: true,
   },

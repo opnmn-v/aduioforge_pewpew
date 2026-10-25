@@ -5,18 +5,18 @@
   "manifest_version": 1,
   "author": "opnmn-v",
   "homepage_url": "https://github.com/opnmn-v/aduioforge_pewpew",
-  "icon": "/aduioforge_pewpew/icon.svg",
+  "icon": "/aduioforge_pewpew/dist/icon.svg",
   "permissions": [
     {
       "name": "autoplay",
       "reason": "Play synchronized music and ambience selected by the game master"
     }
   ],
-  "background_url": "/aduioforge_pewpew/background.html",
+  "background_url": "/aduioforge_pewpew/dist/background.html",
   "action": {
     "title": "Ambient Forge",
-    "icon": "/aduioforge_pewpew/toolbar-logo-v2.svg",
-    "popover": "/aduioforge_pewpew/",
+    "icon": "/aduioforge_pewpew/dist/toolbar-logo-v2.svg",
+    "popover": "/aduioforge_pewpew/dist/index.html",
     "width": 720,
     "height": 700
   }

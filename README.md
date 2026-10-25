@@ -18,7 +18,7 @@ The Pages deployment must serve the extension's `manifest.json` at that address,
 
 ## GitHub Pages deployment
 
-The `Deploy GitHub Pages` workflow tests and builds the app, then publishes `dist`. In repository Settings → Pages, set Source to **GitHub Actions**. Pushes to `main` deploy automatically; the workflow can also be run from the Actions tab.
+The `Deploy GitHub Pages` workflow tests and builds the app, then publishes a root manifest and the compiled app under `dist/`. The manifest always points to `/aduioforge_pewpew/dist/`, so publishing `main` from the repository root also serves the committed build correctly. In repository Settings → Pages, set Source to **GitHub Actions**. Pushes to `main` deploy automatically; the workflow can also be run from the Actions tab.
 
 ## Features
 
@@ -45,7 +45,7 @@ npm install
 npm run dev
 ```
 
-Add `http://localhost:5173/aduioforge_pewpew/manifest.json` as a custom extension. For a standalone visual preview, open `http://localhost:5173/aduioforge_pewpew/?preview=1`.
+Add `http://localhost:5173/aduioforge_pewpew/dist/manifest.json` as a custom extension. For a standalone visual preview, open `http://localhost:5173/aduioforge_pewpew/dist/?preview=1`.
 
 Create a production build with:
 

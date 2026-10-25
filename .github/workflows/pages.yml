@@ -25,10 +25,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - name: Prepare Pages layout
+        run: |
+          mkdir -p release/pages
+          cp -R dist release/pages/dist
+          cp dist/manifest.json release/pages/manifest.json
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: release/pages
   deploy:
     needs: build
     runs-on: ubuntu-latest
