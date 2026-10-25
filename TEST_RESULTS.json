@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-25",
+  "version": "0.1.11",
+  "unit_tests": {
+    "passed": 45,
+    "files": 7
+  },
+  "typescript": "PASS",
+  "production_build": "PASS",
+  "browser": {
+    "engine": "Chromium",
+    "sdk": "simulated Owlbear broadcast",
+    "audio": "real HTMLAudioElement and AudioContext",
+    "result": "PASS",
+    "checks": [
+      "A -> B -> stop A",
+      "master 59/30/10/1/0/80%",
+      "random single track without immediate repeat",
+      "random folder scene",
+      "global pause/resume",
+      "scene editor",
+      "one-second buffered loop over multiple boundaries on one source",
+      "buffered pause/resume"
+    ],
+    "page_errors": []
+  },
+  "youtube": "API mocks only; live Owlbear/YouTube acceptance test remains",
+  "npm_audit": {
+    "high": 0,
+    "critical": 0,
+    "moderate": 2,
+    "notes": "uuid@9.0.1 and transitive SDK; see AUDIT_RU.md"
+  }
+}

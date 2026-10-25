@@ -1,0 +1,1698 @@
+--- a/src/background.test.ts
++++ b/src/background.test.ts
+@@ -1,18 +1,20 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+-import { CHANNEL, LOCAL_CHANNEL, Scene, emptyState } from "./model";
++import { CHANNEL, LOCAL_CHANNEL, Scene, STATUS_CHANNEL, emptyState } from "./model";
+ 
+ const sdk = vi.hoisted(() => ({
++  messages: [] as { channel: string; data: any }[],
+   ready: null as null | (() => Promise<void>),
+-  handlers: {} as Record<string, (event: { data: unknown }) => void>,
++  handlers: {} as Record<string, (event: { data: unknown; connectionId?: string }) => void>,
+ }));
+ 
+ vi.mock("@owlbear-rodeo/sdk", () => ({
+   default: {
+     onReady: (callback: () => Promise<void>) => { sdk.ready = callback; },
+-    player: { getRole: async () => "GM" },
++    player: { getRole: async () => "GM", getConnectionId: async () => "gm", onChange: () => () => undefined },
++    party: { getPlayers: async () => [], onChange: () => () => undefined },
+     broadcast: {
+-      onMessage: (channel: string, callback: (event: { data: unknown }) => void) => { sdk.handlers[channel] = callback; },
+-      sendMessage: async () => undefined,
++      onMessage: (channel: string, callback: (event: { data: unknown; connectionId?: string }) => void) => { sdk.handlers[channel] = callback; },
++      sendMessage: async (channel: string, data: unknown) => { sdk.messages.push({ channel, data }); },
+     },
+   },
+ }));
+@@ -29,10 +31,11 @@
+   paused = true;
+   playCalls = 0;
+ 
+-  constructor(readonly src: string) { FakeAudio.instances.push(this); }
++  constructor(public src = "") { FakeAudio.instances.push(this); }
+   addEventListener(name: string, callback: () => void) { this.listeners.set(name, callback); }
+   emit(name: string) { this.listeners.get(name)?.(); }
+-  play() { this.paused = false; this.playCalls += 1; return Promise.resolve(); }
++  play() { this.paused = false; this.playCalls += 1; this.emit("playing"); return Promise.resolve(); }
++  load() {}
+   pause() { this.paused = true; }
+   removeAttribute(_name: string) { /* no-op */ }
+ }
+@@ -42,20 +45,28 @@
+   volume = 100;
+   muted = false;
+   playCalls = 0;
++  duration = 60;
++  seeks: number[] = [];
++  destroyed = false;
++  pauseCalls = 0;
++  unMuteCalls = 0;
++  events: { onReady: () => void; onStateChange: (event: { data: number }) => void; onAutoplayBlocked: () => void; onError: () => void };
+   readonly onReady: () => void;
+ 
+-  constructor(_host: HTMLElement, options: { events: { onReady: () => void } }) {
++  constructor(_host: HTMLElement, options: { events: FakeYouTubePlayer["events"] }) {
+     this.onReady = options.events.onReady;
++    this.events = options.events;
+     FakeYouTubePlayer.instances.push(this);
+   }
+-  playVideo() { this.playCalls += 1; }
+-  pauseVideo() { /* no-op */ }
++  playVideo() { this.playCalls += 1; this.events.onStateChange({ data: 1 }); }
++  pauseVideo() { this.pauseCalls++; this.events.onStateChange({ data: 2 }); }
+   stopVideo() { /* no-op */ }
+-  destroy() { /* no-op */ }
++  destroy() { this.destroyed = true; }
+   setVolume(value: number) { this.volume = value; }
+   mute() { this.muted = true; }
+-  unMute() { this.muted = false; }
+-  seekTo(_seconds: number, _allowSeekAhead: boolean) { /* no-op */ }
++  unMute() { this.muted = false; this.unMuteCalls++; }
++  seekTo(seconds: number, _allowSeekAhead: boolean) { this.seeks.push(seconds); }
++  getDuration() { return this.duration; }
+ }
+ 
+ const scene = (id: string, youtube = false): Scene => ({
+@@ -72,7 +83,7 @@
+ let revision: number;
+ function state(scenes: Scene[]) {
+   revision += 1;
+-  sdk.handlers[CHANNEL]({ data: {
++  sdk.handlers[CHANNEL]({ connectionId: "gm", data: {
+     type: "STATE",
+     state: {
+       ...emptyState(), revision, updatedAt: Date.now(),
+@@ -80,8 +91,8 @@
+     },
+   } });
+ }
+-function local(data: unknown) { sdk.handlers[LOCAL_CHANNEL]({ data }); }
+-async function flush() { await Promise.resolve(); await Promise.resolve(); }
++function local(data: unknown) { sdk.handlers[LOCAL_CHANNEL]({ connectionId: "gm", data }); }
++async function flush() { for (let i = 0; i < 8; i++) await Promise.resolve(); }
+ 
+ beforeEach(async () => {
+   vi.resetModules();
+@@ -89,6 +100,7 @@
+   vi.setSystemTime(new Date(10_000));
+   sdk.ready = null;
+   sdk.handlers = {};
++  sdk.messages = [];
+   FakeAudio.instances = [];
+   FakeYouTubePlayer.instances = [];
+   revision = 0;
+@@ -99,9 +111,10 @@
+   });
+   vi.stubGlobal("window", globalThis);
+   vi.stubGlobal("Audio", FakeAudio);
++  vi.stubGlobal("location", { origin: "https://example.com" });
+   vi.stubGlobal("YT", { Player: FakeYouTubePlayer });
+   vi.stubGlobal("document", {
+-    createElement: () => ({ style: { cssText: "" }, remove: () => undefined }),
++    createElement: () => ({ style: { cssText: "" }, append: () => undefined, remove: () => undefined }),
+     getElementById: () => ({ append: () => undefined }),
+   });
+   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => setTimeout(() => callback(performance.now()), 16));
+@@ -178,3 +191,101 @@
+   expect(audio.volume).toBe(0);
+   expect(audio.muted).toBe(true);
+ });
++
++
++describe("playback regressions", () => {
++  it("applies every low volume, including 1%, to each independent YouTube player", async () => {
++    state([scene("a", true), scene("b", true)]); await flush();
++    const [a, b] = FakeYouTubePlayer.instances; a.onReady(); b.onReady();
++    let masterRevision = 1000;
++    for (const volume of [59, 30, 10, 1, 0, 70]) {
++      local({ type: "MASTER", volume, muted: false, revision: ++masterRevision });
++      expect(b.volume).toBe(volume); expect(b.muted).toBe(volume === 0);
++    }
++  });
++  it("starts fade-in after slow YouTube readiness, not during download", async () => {
++    state([{ ...scene("a", true), fadeIn: 2 }]); await flush();
++    vi.advanceTimersByTime(20_000);
++    const a = FakeYouTubePlayer.instances[0]; a.onReady();
++    expect(a.volume).toBe(0);
++    vi.advanceTimersByTime(1000); expect(a.volume).toBe(40);
++    vi.advanceTimersByTime(1000); expect(a.volume).toBe(80);
++  });
++  it("wraps late YouTube playback at the actual duration, then loops without affecting B", async () => {
++    vi.setSystemTime(131_000);
++    state([scene("a", true), scene("b", true)]); await flush();
++    const [a, b] = FakeYouTubePlayer.instances; a.onReady(); b.onReady();
++    expect(a.seeks[0]).toBe(10);
++    a.events.onStateChange({ data: 0 }); vi.advanceTimersByTime(1);
++    expect(a.seeks.at(-1)).toBe(0); expect(b.pauseCalls).toBe(0);
++  });
++  it("waits for YouTube metadata if duration is zero at onReady", async () => {
++    state([scene("a", true)]); await flush(); const a = FakeYouTubePlayer.instances[0];
++    a.duration = 0; a.onReady(); expect(a.seeks).toEqual([]);
++    a.duration = 5; a.events.onStateChange({ data: 1 }); expect(a.seeks).toEqual([4]);
++  });
++  it("recovers a blocked YouTube play when Enable audio is pressed again", async () => {
++    state([scene("a", true)]); await flush(); const a = FakeYouTubePlayer.instances[0]; a.onReady();
++    a.events.onAutoplayBlocked();
++    expect(sdk.messages.filter(item => item.channel === STATUS_CHANNEL).at(-1)?.data.status).toBe("blocked");
++    local({ type: "UNLOCK" }); await flush(); expect(a.playCalls).toBe(2);
++    expect(sdk.messages.filter(item => item.channel === STATUS_CHANNEL).at(-1)?.data.status).toBe("playing");
++  });
++  it("preserves B through A → B → stop A, while B is still loading", async () => {
++    state([scene("a", true)]); await flush(); const a = FakeYouTubePlayer.instances[0]; a.onReady();
++    state([scene("a", true), { ...scene("b", true), fadeIn: 2 }]); await flush();
++    state([{ ...scene("b", true), fadeIn: 2 }]); vi.advanceTimersByTime(3000);
++    const b = FakeYouTubePlayer.instances[1]; b.onReady();
++    expect(a.destroyed).toBe(true); expect(b.destroyed).toBe(false); expect(b.playCalls).toBe(1);
++    vi.advanceTimersByTime(1000); expect(b.volume).toBe(40); expect(b.pauseCalls).toBe(0);
++  });
++  it("ignores onReady after an unstarted YouTube runtime is removed", async () => {
++    state([scene("a", true)]); await flush(); const a = FakeYouTubePlayer.instances[0];
++    state([]); a.onReady(); expect(a.destroyed).toBe(true); expect(a.playCalls).toBe(0);
++  });
++  it("never fades B by reissuing unMute while A stops", async () => {
++    state([scene("a", true), scene("b", true)]); await flush();
++    const [a, b] = FakeYouTubePlayer.instances; a.onReady(); b.onReady();
++    const unMuteCalls = b.unMuteCalls;
++    state([scene("b", true)]); vi.advanceTimersByTime(2500);
++    expect(b.unMuteCalls).toBe(unMuteCalls); expect(b.destroyed).toBe(false); expect(b.volume).toBe(80);
++  });
++  it("cancels a pending random repeat during pause and resumes it afterwards", async () => {
++    const s = scene("a"); s.tracks[0].delayMin = 2; s.tracks[0].delayMax = 2;
++    state([s]); await flush(); const a = FakeAudio.instances.find(item => item.src.endsWith("/a.mp3"))!;
++    a.emit("loadedmetadata"); a.emit("ended");
++    sdk.handlers[CHANNEL]({ connectionId: "gm", data: { type: "STATE", state: { ...emptyState(), revision: ++revision, status: "paused", pausedAt: Date.now(), active: [{ scene: s, startedAt: 1000 }] } } });
++    vi.advanceTimersByTime(4000); expect(a.playCalls).toBe(1);
++    state([s]); vi.advanceTimersByTime(2100); expect(a.playCalls).toBe(2);
++  });
++  it("plays only the chosen random track on all clients", async () => {
++    const s = scene("a"); s.tracks.push({ ...scene("b").tracks[0] });
++    sdk.handlers[CHANNEL]({ connectionId: "gm", data: { type: "STATE", state: { ...emptyState(), revision: ++revision, active: [{ scene: s, startedAt: 1000, trackId: "b" }] } } });
++    await flush();
++    expect(FakeAudio.instances.filter(item => item.src.startsWith("https:"))).toHaveLength(1);
++    expect(FakeAudio.instances.at(-1)?.src).toContain("/b.mp3");
++  });
++});
++
++it("rejects room-state commands and local master changes from a player", async () => {
++  sdk.handlers[CHANNEL]({ connectionId: "player", data: { type: "STATE", state: { ...emptyState(), revision: 50, active: [{ scene: scene("a"), startedAt: 1000 }] } } });
++  await flush(); expect(FakeAudio.instances.filter(item => item.src.startsWith("https:"))).toHaveLength(0);
++  state([scene("b")]); await flush(); const b = FakeAudio.instances.find(item => item.src.endsWith("/b.mp3"))!; b.emit("loadedmetadata");
++  sdk.handlers[LOCAL_CHANNEL]({ connectionId: "player", data: { type: "MASTER", volume: 0, muted: true, revision: 1000 } });
++  expect(b.volume).toBe(.8);
++});
++
++it("does not restart a finished one-shot when another scene changes", async () => {
++  const s = scene("a"); s.tracks[0].loop = false;
++  state([s]); await flush(); const a = FakeAudio.instances.find(item => item.src.endsWith("/a.mp3"))!;
++  a.emit("loadedmetadata"); a.emit("ended");
++  state([s, scene("b")]); await flush(); expect(a.playCalls).toBe(1);
++});
++
++it("retries native audio after a rejected play promise", async () => {
++  state([scene("a")]); await flush(); const a = FakeAudio.instances.find(item => item.src.endsWith("/a.mp3"))!;
++  const play = vi.spyOn(a, "play").mockRejectedValueOnce(Object.assign(new Error("Autoplay"), { name: "NotAllowedError" }));
++  a.emit("loadedmetadata"); await flush();
++  expect(sdk.messages.filter(item => item.channel === STATUS_CHANNEL).at(-1)?.data.status).toBe("blocked");
++  local({ type: "UNLOCK" }); await flush(); expect(play).toHaveBeenCalledTimes(2); expect(a.paused).toBe(false);
++});
+--- a/src/background.ts
++++ b/src/background.ts
+@@ -1,49 +1,31 @@
+ import OBR from "@owlbear-rodeo/sdk";
+ import {
+-  CHANNEL, LOCAL_CHANNEL, ActiveScene, PlaybackState, Scene, SyncMessage, Track,
+-  emptyState, masterShouldMute, normalizeAudioUrl, sourceKind, validLocalMessage, validSyncMessage, youtubeId,
++  CHANNEL, LOCAL_CHANNEL, STATUS_CHANNEL, ActiveScene, AudioStatus, PlaybackFeedback, PlaybackState, Scene, SyncMessage, Track,
++  emptyState, normalizeAudioUrl, sourceKind, validLocalMessage, validSyncMessage, youtubeId,
+ } from "./model";
++import { BufferedAudio } from "./buffered-audio";
++import { syncAccess } from "./sync-access";
++import { activeTracks, playbackOffset } from "./playback";
+ 
+ interface YTPlayer {
+-  playVideo(): void; pauseVideo(): void; stopVideo(): void; destroy(): void;
+-  setVolume(value: number): void; mute(): void; unMute(): void; seekTo(seconds: number, allowSeekAhead: boolean): void;
+-}
+-interface YTNamespace {
+-  Player: new (element: HTMLElement, options: Record<string, unknown>) => YTPlayer;
+-}
++  playVideo(): void; pauseVideo(): void; destroy(): void;
++  setVolume(value: number): void; mute(): void; unMute(): void;
++  seekTo(seconds: number, allowSeekAhead: boolean): void;
++  getDuration(): number;
++}
++interface YTNamespace { Player: new (element: HTMLElement, options: Record<string, unknown>) => YTPlayer }
+ declare global { interface Window { YT?: YTNamespace; onYouTubeIframeAPIReady?: () => void } }
+ 
+ type Runtime = {
+-  key: string;
+-  scene: Scene;
+-  track: Track;
+-  startedAt: number;
+-  preview: boolean;
+-  source: string;
+-  audio?: HTMLAudioElement;
+-  player?: YTPlayer;
+-  host?: HTMLDivElement;
+-  fade?: number;
+-  retry?: number;
+-  settle?: number;
+-  ready: boolean;
+-  gain: number;
+-  paused: boolean;
+-  playbackRequested?: boolean;
+-  retiring: boolean;
+-  destroyed: boolean;
++  key: string; instanceId?: string; scene: Scene; track: Track; startedAt: number; preview: boolean; source: string;
++  audio?: HTMLAudioElement | BufferedAudio; player?: YTPlayer; host?: HTMLDivElement;
++  fade?: number; retry?: number; settle?: number; repeatAt?: number; repeatRemaining?: number;
++  ready: boolean; gain: number; paused: boolean; playbackRequested?: boolean;
++  retiring: boolean; destroyed: boolean; began?: boolean; sought?: boolean;
++  fadeStarted?: number; fadeDuration?: number; fadeFrom?: number; fadeTo?: number;
++  appliedVolume?: number; appliedMute?: boolean; status: AudioStatus;
+ };
+-
+-type PendingRuntime = {
+-  token: symbol;
+-  key: string;
+-  active: ActiveScene;
+-  track: Track;
+-  preview: boolean;
+-  previewRevision: number;
+-  source: string;
+-};
+-
++type PendingRuntime = { key: string; active: ActiveScene; track: Track; preview: boolean; previewRevision: number; source: string };
+ const runtimes = new Map<string, Runtime>();
+ const liveRuntimes = new Set<Runtime>();
+ const pendingRuntimes = new Map<string, PendingRuntime>();
+@@ -52,7 +34,6 @@
+ let preview: Scene | null = null;
+ let previewRevision = 0;
+ let master = { volume: 80, muted: false };
+-let masterLevel = 0.8;
+ let lastMasterRevision = 0;
+ let ytReady: Promise<void> | null = null;
+ let audioUnlocked = false;
+@@ -60,355 +41,331 @@
+ function loadMaster() {
+   try {
+     const value = JSON.parse(localStorage.getItem("ambient-forge-master") || "null") as typeof master | null;
+-    if (value && typeof value.volume === "number" && value.volume >= 0 && value.volume <= 100 && typeof value.muted === "boolean") {
+-      master = value;
+-    }
+-  } catch { /* ignored */ }
+-  masterLevel = master.muted ? 0 : master.volume / 100;
+-}
+-
+-function trackSource(track: Track): string {
++    if (value && Number.isFinite(value.volume) && value.volume >= 0 && value.volume <= 100 && typeof value.muted === "boolean") master = value;
++  } catch { /* use defaults */ }
++}
++function trackSource(track: Track) {
+   const kind = sourceKind(track);
+-  const url = kind === "audio" ? normalizeAudioUrl(track.url) : track.url.trim();
+-  return `${kind}:${url}`;
+-}
+-
++  return `${kind}:${track.seamlessLoop ? "buffer:" : ""}${kind === "audio" ? normalizeAudioUrl(track.url) : track.url.trim()}`;
++}
++function report(runtime: Runtime, status: AudioStatus, force = false) {
++  if (runtime.destroyed || runtime.retiring || runtime.preview || (!force && runtime.status === status)) return;
++  runtime.status = status;
++  const message: PlaybackFeedback = { type: "PLAYBACK_STATUS", sceneId: runtime.scene.id, trackId: runtime.track.id, startedAt: runtime.startedAt, status };
++  void OBR.broadcast.sendMessage(STATUS_CHANNEL, message, { destination: "LOCAL" }).catch(() => undefined);
++}
+ function ensureYouTube(): Promise<void> {
+   if (window.YT?.Player) return Promise.resolve();
+   if (ytReady) return ytReady;
+   ytReady = new Promise((resolve, reject) => {
+-    window.onYouTubeIframeAPIReady = resolve;
+     const script = document.createElement("script");
++    const timeout = window.setTimeout(() => failed(), 15000);
++    const failed = () => { clearTimeout(timeout); script.remove(); ytReady = null; reject(new Error("YouTube API unavailable")); };
++    window.onYouTubeIframeAPIReady = () => { clearTimeout(timeout); resolve(); };
+     script.src = "https://www.youtube.com/iframe_api";
+-    script.onerror = () => {
+-      ytReady = null;
+-      reject(new Error("YouTube iframe API failed to load"));
+-    };
++    script.onerror = failed;
+     document.head.append(script);
+   });
+   return ytReady;
+ }
+-
+-function runtimeVolume(runtime: Runtime): number {
+-  const value = masterLevel * runtime.scene.volume / 100 * runtime.track.volume / 100 * runtime.gain;
+-  return Math.max(0, Math.min(1, value));
+-}
+-
+ function applyVolume(runtime: Runtime) {
+   if (runtime.destroyed) return;
+-  const volume = runtimeVolume(runtime);
+-  const muted = runtime.track.muted || masterShouldMute(master, masterLevel);
+-  if (runtime.audio) {
+-    runtime.audio.volume = volume;
+-    runtime.audio.muted = muted;
+-  }
+-  if (runtime.player) {
+-    runtime.player.setVolume(volume * 100);
+-    if (muted) runtime.player.mute(); else runtime.player.unMute();
+-  }
+-}
+-
+-function rampMaster(next: typeof master) {
+-  master = next;
+-  localStorage.setItem("ambient-forge-master", JSON.stringify(master));
+-  // Audio lives in a hidden extension frame. Its animation frames may never run.
+-  // Master control must be effective on receipt, including a true 0% mute.
+-  masterLevel = master.muted ? 0 : master.volume / 100;
+-  for (const runtime of liveRuntimes) applyVolume(runtime);
+-}
+-
+-function seekOffset(startedAt: number, duration?: number): number {
+-  const elapsed = Math.max(0, (Date.now() - startedAt) / 1000);
+-  return duration && Number.isFinite(duration) && duration > 0 ? elapsed % duration : elapsed;
+-}
+-
+-function shouldPlay(runtime: Runtime): boolean {
++  const volume = Math.max(0, Math.min(1, master.volume / 100 * runtime.scene.volume / 100 * runtime.track.volume / 100 * runtime.gain));
++  const muted = runtime.track.muted || master.muted || volume === 0;
++  if (runtime.audio) { runtime.audio.volume = volume; runtime.audio.muted = muted; }
++  // Commands before onReady can be lost (or throw). Repeated unMute commands
++  // during another player's fade are unnecessary and can disturb iframe playback.
++  if (runtime.player && runtime.ready) {
++    const percent = Math.round(volume * 100);
++    if (runtime.appliedVolume !== percent) { runtime.player.setVolume(percent); runtime.appliedVolume = percent; }
++    if (runtime.appliedMute !== muted) {
++      if (muted) runtime.player.mute(); else runtime.player.unMute();
++      runtime.appliedMute = muted;
++    }
++  }
++}
++function shouldPlay(runtime: Runtime) {
+   return audioUnlocked && liveRuntimes.has(runtime) && !runtime.retiring && !runtime.paused && (runtime.preview || current.status === "playing");
+ }
+-
++function clock(runtime: Runtime) {
++  const active = current.active.find(item => item.scene.id === runtime.scene.id);
++  return runtime.preview ? Date.now() : Math.min(Date.now(), active?.pausedAt ?? Infinity, current.pausedAt ?? Infinity);
++}
++function seek(runtime: Runtime) {
++  const duration = runtime.audio?.duration ?? runtime.player?.getDuration();
++  // YouTube may report duration=0 until PLAYING. Defer seeking until known.
++  if (!duration || !Number.isFinite(duration) || duration <= 0) return;
++  const offset = playbackOffset(runtime.startedAt, clock(runtime), duration, runtime.track.loop);
++  runtime.sought = true;
++  if (runtime.audio) runtime.audio.currentTime = offset;
++  else runtime.player?.seekTo(offset, true);
++}
+ function syncPlayback(runtime: Runtime) {
+   if (runtime.destroyed || !runtime.ready) return;
+   const play = shouldPlay(runtime);
++  if (play && runtime.status === "ended" && !runtime.track.loop) return;
++  if (!play && runtime.retry !== undefined) {
++    clearTimeout(runtime.retry); runtime.retry = undefined;
++    runtime.repeatRemaining = Math.max(0, (runtime.repeatAt ?? Date.now()) - Date.now());
++  }
++  if (play && runtime.repeatRemaining !== undefined) {
++    if (runtime.retry === undefined) scheduleRepeat(runtime, runtime.repeatRemaining);
++    return;
++  }
+   if (runtime.playbackRequested === play) return;
+   runtime.playbackRequested = play;
+   if (play) {
+-    if (runtime.audio) void runtime.audio.play().catch(() => undefined);
++    if (runtime.audio) void runtime.audio.play().catch((error: unknown) => {
++      if (error instanceof Error && error.name === "AbortError") return;
++      if (!runtime.destroyed && !runtime.retiring && runtime.playbackRequested) {
++        runtime.playbackRequested = undefined;
++        report(runtime, error instanceof Error && error.name === "NotAllowedError" ? "blocked" : "error");
++      }
++    });
+     runtime.player?.playVideo();
+-  } else {
+-    runtime.audio?.pause();
+-    runtime.player?.pauseVideo();
+-  }
+-}
+-
+-function scheduleRandomRepeat(runtime: Runtime) {
+-  if (!runtime.track.loop || runtime.track.delayMax <= 0 || runtime.retiring || runtime.destroyed) return;
+-  const min = Math.max(0, runtime.track.delayMin);
+-  const max = Math.max(min, runtime.track.delayMax);
+-  const delay = (min + Math.random() * (max - min)) * 1000;
+-  runtime.retry = window.setTimeout(() => {
+-    runtime.retry = undefined;
+-    if (!shouldPlay(runtime)) return;
+-    if (runtime.audio) { runtime.audio.currentTime = 0; void runtime.audio.play().catch(() => undefined); }
+-    if (runtime.player) { runtime.player.seekTo(0, true); runtime.player.playVideo(); }
+-  }, delay);
+-}
+-
+-function createAudio(scene: Scene, track: Track, startedAt: number, key: string, previewMode: boolean, paused: boolean): Runtime {
+-  const audio = new Audio(normalizeAudioUrl(track.url));
+-  audio.preload = "auto";
+-  audio.loop = track.loop && track.delayMax === 0;
+-  const runtime: Runtime = {
+-    key, scene, track, startedAt, preview: previewMode,
+-    source: trackSource(track), audio, ready: false,
+-    gain: 1, paused, retiring: false, destroyed: false,
+-  };
+-  audio.addEventListener("loadedmetadata", () => {
+-    runtime.ready = true;
+-    if (track.loop) audio.currentTime = seekOffset(startedAt, audio.duration);
+-    applyVolume(runtime);
+-    syncPlayback(runtime);
+-  });
+-  audio.addEventListener("ended", () => scheduleRandomRepeat(runtime));
+-  audio.addEventListener("error", () => console.warn("Ambient Forge: audio source failed", track.url));
+-  applyVolume(runtime);
+-  return runtime;
+-}
+-
+-async function createYouTube(scene: Scene, track: Track, startedAt: number, key: string, previewMode: boolean, paused: boolean): Promise<Runtime | null> {
+-  const videoId = youtubeId(track.url);
+-  if (!videoId) return null;
+-  await ensureYouTube();
+-  const host = document.createElement("div");
+-  host.style.cssText = "position:fixed;width:1px;height:1px;left:-9999px;top:-9999px";
+-  document.getElementById("audio-root")?.append(host);
+-  const runtime: Runtime = {
+-    key, scene, track, startedAt, preview: previewMode,
+-    source: trackSource(track), host, ready: false,
+-    gain: 1, paused, retiring: false, destroyed: false,
+-  };
+-  runtime.player = new window.YT!.Player(host, {
+-    videoId,
+-    playerVars: { autoplay: 0, controls: 0, disablekb: 1, playsinline: 1 },
+-    events: {
+-      onReady: () => {
+-        runtime.ready = true;
+-        runtime.player?.seekTo(seekOffset(startedAt), true);
+-        applyVolume(runtime);
+-        syncPlayback(runtime);
+-      },
+-      onStateChange: (event: { data: number }) => {
+-        if (event.data !== 0 || runtime.retiring || runtime.destroyed || !liveRuntimes.has(runtime)) return;
+-        if (track.loop && track.delayMax === 0 && shouldPlay(runtime)) {
+-          runtime.player?.seekTo(0, true);
+-          runtime.player?.playVideo();
+-        } else scheduleRandomRepeat(runtime);
+-      },
+-      onError: (event: unknown) => console.warn("Ambient Forge: YouTube source failed", event, track.url),
+-    },
+-  });
+-  return runtime;
+-}
+-
+-function requestIsCurrent(request: PendingRuntime): boolean {
+-  if (pendingRuntimes.get(request.key) !== request) return false;
+-  if (request.preview) {
+-    return request.previewRevision === previewRevision
+-      && preview?.id === request.active.scene.id
+-      && preview.tracks.some(track => track.id === request.track.id && trackSource(track) === request.source);
+-  }
+-  const allowed = current.scope === "GLOBAL" || role === "GM";
+-  if (!allowed) return false;
+-  const active = current.active.find(item => item.scene.id === request.active.scene.id && item.startedAt === request.active.startedAt);
+-  const track = active?.scene.tracks.find(item => item.id === request.track.id);
+-  return !!track && trackSource(track) === request.source;
+-}
+-
+-function fade(runtime: Runtime, from: number, to: number, duration: number, done?: () => void) {
+-  if (runtime.fade) clearInterval(runtime.fade);
+-  if (runtime.settle) clearTimeout(runtime.settle);
++  } else { runtime.audio?.pause(); runtime.player?.pauseVideo(); report(runtime, audioUnlocked ? "paused" : "blocked"); }
++}
++function startFade(runtime: Runtime, from: number, to: number, duration: number, done?: () => void) {
++  if (runtime.fade !== undefined) clearInterval(runtime.fade);
++  if (runtime.settle !== undefined) clearTimeout(runtime.settle);
+   runtime.settle = undefined;
+   runtime.gain = from;
++  runtime.fadeStarted = Date.now(); runtime.fadeDuration = duration; runtime.fadeFrom = from; runtime.fadeTo = to;
+   applyVolume(runtime);
+-  const began = performance.now();
+-  runtime.fade = window.setInterval(() => {
+-    const progress = Math.min(1, (performance.now() - began) / Math.max(1, duration));
++  const tick = () => {
++    // Pause fade-in with playback. Fade-out is a stop operation and must finish.
++    const now = Date.now();
++    if (!runtime.retiring && !shouldPlay(runtime)) { runtime.fadeStarted! += now - lastTick; lastTick = now; return; }
++    lastTick = now;
++    const progress = Math.min(1, (now - runtime.fadeStarted!) / Math.max(1, duration));
+     runtime.gain = from + (to - from) * progress;
+     applyVolume(runtime);
+     if (progress >= 1) {
+-      if (runtime.fade) clearInterval(runtime.fade);
+-      runtime.fade = undefined;
+-      runtime.gain = to;
+-      applyVolume(runtime);
+-      if (to <= 0) {
+-        if (runtime.audio) {
+-          runtime.audio.volume = 0;
+-          runtime.audio.muted = true;
+-        }
+-        if (runtime.player) {
+-          try { runtime.player.setVolume(0); runtime.player.mute(); } catch { /* player may still be initializing */ }
+-        }
+-        runtime.settle = window.setTimeout(() => {
+-          runtime.settle = undefined;
+-          done?.();
+-        }, 80);
+-      } else done?.();
++      clearInterval(runtime.fade); runtime.fade = undefined;
++      done?.();
+     }
+-  }, 40);
+-}
+-
++  };
++  let lastTick = Date.now();
++  runtime.fade = window.setInterval(tick, 40);
++}
++function onPlaying(runtime: Runtime) {
++  if (runtime.destroyed || runtime.retiring) return;
++  if (!shouldPlay(runtime)) { runtime.playbackRequested = undefined; syncPlayback(runtime); return; }
++  if (!runtime.sought) seek(runtime);
++  if (!runtime.began) {
++    runtime.began = true;
++    if (runtime.scene.fadeIn > 0) startFade(runtime, 0, 1, runtime.scene.fadeIn * 1000);
++  }
++  applyVolume(runtime);
++  report(runtime, "playing");
++}
++function scheduleRepeat(runtime: Runtime, remaining?: number) {
++  if (!runtime.track.loop || runtime.retiring || runtime.destroyed) { report(runtime, "ended"); return; }
++  if (runtime.retry !== undefined) clearTimeout(runtime.retry);
++  const min = Math.min(runtime.track.delayMin, runtime.track.delayMax);
++  const max = Math.max(runtime.track.delayMin, runtime.track.delayMax);
++  const delay = remaining ?? (min + Math.random() * (max - min)) * 1000;
++  runtime.repeatRemaining = delay;
++  report(runtime, "waiting");
++  if (!shouldPlay(runtime)) return;
++  runtime.repeatAt = Date.now() + delay;
++  runtime.retry = window.setTimeout(() => {
++    runtime.retry = undefined; runtime.repeatRemaining = undefined;
++    if (!shouldPlay(runtime)) { runtime.repeatRemaining = 0; return; }
++    if (runtime.audio) runtime.audio.currentTime = 0;
++    runtime.player?.seekTo(0, true);
++    runtime.playbackRequested = undefined; syncPlayback(runtime);
++  }, delay);
++}
++function baseRuntime(scene: Scene, track: Track, startedAt: number, key: string, previewMode: boolean, paused: boolean): Runtime {
++  return { key, scene, track, startedAt, preview: previewMode, source: trackSource(track), ready: false,
++    gain: scene.fadeIn > 0 ? 0 : 1, paused, retiring: false, destroyed: false, status: "loading" };
++}
++function createAudio(scene: Scene, track: Track, startedAt: number, key: string, previewMode: boolean, paused: boolean) {
++  const runtime = baseRuntime(scene, track, startedAt, key, previewMode, paused);
++  const audio = track.seamlessLoop ? new BufferedAudio(normalizeAudioUrl(track.url)) : new Audio(); runtime.audio = audio;
++  if (!(audio instanceof BufferedAudio)) audio.preload = "auto";
++  audio.loop = track.loop && track.delayMax === 0 && track.delayMin === 0;
++  audio.addEventListener("loadedmetadata", () => {
++    if (runtime.destroyed) return;
++    runtime.ready = true; seek(runtime); applyVolume(runtime); syncPlayback(runtime);
++  });
++  audio.addEventListener("playing", () => onPlaying(runtime));
++  audio.addEventListener("waiting", () => report(runtime, "loading"));
++  audio.addEventListener("pause", () => report(runtime, "paused"));
++  audio.addEventListener("ended", () => scheduleRepeat(runtime));
++  audio.addEventListener("error", () => { runtime.playbackRequested = undefined; report(runtime, "error"); });
++  if (!(audio instanceof BufferedAudio)) audio.src = normalizeAudioUrl(track.url);
++  applyVolume(runtime);
++  return runtime;
++}
++async function createYouTube(request: PendingRuntime): Promise<Runtime | null> {
++  const { active, track, key, preview: previewMode } = request;
++  const videoId = youtubeId(track.url);
++  if (!videoId) throw new Error("Invalid YouTube video URL");
++  await ensureYouTube();
++  if (!requestIsCurrent(request)) return null;
++  // YT replaces its target div with an iframe. Keep an outer host to reliably
++  // remove the actual iframe on cancellation, including before onReady.
++  const host = document.createElement("div");
++  const target = document.createElement("div"); host.append(target);
++  host.style.cssText = "position:fixed;width:200px;height:200px;left:-10000px;top:0";
++  document.getElementById("audio-root")?.append(host);
++  const runtime = baseRuntime(active.scene, track, active.startedAt, key, previewMode, active.pausedAt !== undefined);
++  runtime.host = host; runtime.instanceId = active.instanceId;
++  runtime.player = new window.YT!.Player(target, {
++    videoId, width: 200, height: 200,
++    playerVars: { autoplay: 0, controls: 0, disablekb: 1, playsinline: 1, origin: location.origin },
++    events: {
++      onReady: () => {
++        if (runtime.destroyed) return;
++        runtime.ready = true; seek(runtime); applyVolume(runtime); syncPlayback(runtime);
++      },
++      onStateChange: (event: { data: number }) => {
++        if (runtime.destroyed || runtime.retiring) return;
++        if (event.data === 1) onPlaying(runtime);
++        if (event.data === 3) report(runtime, "loading");
++        if (event.data === 2) { runtime.playbackRequested = undefined; report(runtime, "paused"); }
++        if (event.data === 0) { runtime.playbackRequested = undefined; scheduleRepeat(runtime); }
++      },
++      onAutoplayBlocked: () => { runtime.playbackRequested = undefined; report(runtime, "blocked"); },
++      onError: () => { runtime.playbackRequested = undefined; report(runtime, "error"); },
++    },
++  });
++  return runtime;
++}
++function requestIsCurrent(request: PendingRuntime) {
++  if (pendingRuntimes.get(request.key) !== request) return false;
++  if (request.preview) return request.previewRevision === previewRevision && preview?.id === request.active.scene.id
++    && preview.tracks.some(track => track.id === request.track.id && trackSource(track) === request.source);
++  if (current.scope !== "GLOBAL" && role !== "GM") return false;
++  const active = current.active.find(item => item.scene.id === request.active.scene.id && item.startedAt === request.active.startedAt && item.instanceId === request.active.instanceId);
++  return !!active && activeTracks(active).some(track => track.id === request.track.id && trackSource(track) === request.source);
++}
+ function destroy(runtime: Runtime) {
+   if (runtime.destroyed) return;
+   runtime.destroyed = true;
+-  if (runtime.fade) clearInterval(runtime.fade);
+-  if (runtime.retry) clearTimeout(runtime.retry);
+-  if (runtime.settle) clearTimeout(runtime.settle);
+-  runtime.audio?.pause();
+-  runtime.audio?.removeAttribute("src");
+-  try { runtime.player?.destroy(); } catch { /* player may not have finished initializing */ }
+-  runtime.host?.remove();
+-  liveRuntimes.delete(runtime);
++  if (runtime.fade !== undefined) clearInterval(runtime.fade);
++  if (runtime.retry !== undefined) clearTimeout(runtime.retry);
++  if (runtime.settle !== undefined) clearTimeout(runtime.settle);
++  runtime.audio?.pause(); runtime.audio?.removeAttribute("src"); runtime.audio?.load();
++  try { runtime.player?.destroy(); } catch { /* outer host also removes a pending iframe */ }
++  runtime.host?.remove(); liveRuntimes.delete(runtime);
+   if (runtimes.get(runtime.key) === runtime) runtimes.delete(runtime.key);
+ }
+-
+ function removeRuntime(runtime: Runtime, immediate = false) {
+   if (runtimes.get(runtime.key) === runtime) runtimes.delete(runtime.key);
+   runtime.retiring = true;
+-  if (runtime.retry) clearTimeout(runtime.retry);
++  if (runtime.retry !== undefined) clearTimeout(runtime.retry);
+   runtime.retry = undefined;
+-  if (immediate || runtime.scene.fadeOut <= 0) destroy(runtime);
+-  else fade(runtime, runtime.gain, 0, runtime.scene.fadeOut * 1000, () => destroy(runtime));
+-}
+-
++  if (immediate || !runtime.began || runtime.scene.fadeOut <= 0) destroy(runtime);
++  else startFade(runtime, runtime.gain, 0, runtime.scene.fadeOut * 1000, () => {
++    // Let the iframe process the final mute before removing it.
++    runtime.settle = window.setTimeout(() => destroy(runtime), 80);
++  });
++}
+ function activateRuntime(runtime: Runtime) {
+-  for (const retiring of [...liveRuntimes]) {
+-    if (retiring.key === runtime.key && retiring.retiring) destroy(retiring);
+-  }
+-  const replaced = runtimes.get(runtime.key);
+-  if (replaced && replaced !== runtime) removeRuntime(replaced, true);
+-  runtimes.set(runtime.key, runtime);
+-  liveRuntimes.add(runtime);
+-  applyVolume(runtime);
+-  if (runtime.scene.fadeIn > 0) fade(runtime, 0, 1, runtime.scene.fadeIn * 1000);
+-  syncPlayback(runtime);
+-}
+-
++  for (const old of [...liveRuntimes]) if (old.key === runtime.key) destroy(old);
++  runtimes.set(runtime.key, runtime); liveRuntimes.add(runtime);
++  report(runtime, "loading", true); applyVolume(runtime); syncPlayback(runtime);
++}
+ function ensureRuntime(active: ActiveScene, track: Track, previewMode = false, session = 0) {
+   const key = `${previewMode ? "preview" : active.scene.id}:${track.id}`;
+-  if (!track.url.trim()) return;
+   const source = trackSource(track);
+   const pending = pendingRuntimes.get(key);
+   if (pending && pending.active.startedAt === active.startedAt && pending.source === source && pending.previewRevision === session) return;
+-  const request: PendingRuntime = {
+-    token: Symbol(key), key, active, track, preview: previewMode,
+-    previewRevision: session, source,
+-  };
++  const request: PendingRuntime = { key, active, track, preview: previewMode, previewRevision: session, source };
+   pendingRuntimes.set(key, request);
+   void (async () => {
+     try {
+-      const runtime = sourceKind(track) === "youtube"
+-        ? await createYouTube(active.scene, track, active.startedAt, key, previewMode, !previewMode && active.pausedAt !== undefined)
+-        : createAudio(active.scene, track, active.startedAt, key, previewMode, !previewMode && active.pausedAt !== undefined);
++      const runtime = sourceKind(track) === "youtube" ? await createYouTube(request)
++        : createAudio(active.scene, track, active.startedAt, key, previewMode, active.pausedAt !== undefined);
+       if (!runtime) return;
+       if (!requestIsCurrent(request)) destroy(runtime);
+       else {
+         if (!previewMode) {
+-          const latest = current.active.find(item => item.scene.id === active.scene.id);
+-          if (latest) {
+-            runtime.startedAt = latest.startedAt;
+-            runtime.paused = latest.pausedAt !== undefined;
+-          }
++          const latest = current.active.find(item => item.scene.id === active.scene.id)!;
++          runtime.scene = latest.scene; runtime.track = activeTracks(latest).find(item => item.id === track.id)!;
++          runtime.startedAt = latest.startedAt; runtime.paused = latest.pausedAt !== undefined;
+         }
++        runtime.instanceId = active.instanceId;
+         activateRuntime(runtime);
+       }
+-    } catch (error) {
+-      console.warn("Ambient Forge: source initialization failed", error, track.url);
+-    } finally {
+-      if (pendingRuntimes.get(key) === request) pendingRuntimes.delete(key);
+-    }
++    } catch {
++      if (requestIsCurrent(request)) report(baseRuntime(active.scene, track, active.startedAt, key, previewMode, false), "error", true);
++    } finally { if (pendingRuntimes.get(key) === request) pendingRuntimes.delete(key); }
+   })();
+ }
+-
+-function reconcile(state: PlaybackState, immediate = false) {
++function reconcile(state: PlaybackState) {
+   const resumingGlobalPause = current.status === "paused" && state.status === "playing";
+   current = state;
+   const allowed = state.scope === "GLOBAL" || role === "GM";
+   const desired = new Map<string, { active: ActiveScene; track: Track; source: string }>();
+-  if (allowed) for (const active of state.active) for (const track of active.scene.tracks) {
++  if (allowed) for (const active of state.active) for (const track of activeTracks(active)) {
+     desired.set(`${active.scene.id}:${track.id}`, { active, track, source: trackSource(track) });
+   }
+-  for (const [key] of pendingRuntimes) {
+-    if (!key.startsWith("preview:") && !desired.has(key)) pendingRuntimes.delete(key);
+-  }
+-  for (const runtime of [...runtimes.values()]) {
+-    if (!runtime.preview && !desired.has(runtime.key)) removeRuntime(runtime, immediate);
+-  }
++  for (const [key] of pendingRuntimes) if (!key.startsWith("preview:") && !desired.has(key)) pendingRuntimes.delete(key);
++  // A privacy scope change must silence the player's retiring fades too.
++  if (state.status === "paused") for (const runtime of [...liveRuntimes]) if (runtime.retiring) destroy(runtime);
++  if (!allowed) for (const runtime of [...liveRuntimes]) if (!runtime.preview) destroy(runtime);
++  for (const runtime of [...runtimes.values()]) if (!runtime.preview && !desired.has(runtime.key)) removeRuntime(runtime);
+   for (const [key, item] of desired) {
+     const runtime = runtimes.get(key);
+     const paused = item.active.pausedAt !== undefined;
+     const resumingScene = !!runtime?.paused && !paused;
+     const startedAtChanged = runtime?.startedAt !== item.active.startedAt;
+-    if (runtime && (runtime.source !== item.source || (startedAtChanged && !resumingScene && !resumingGlobalPause))) {
+-      removeRuntime(runtime);
+-      ensureRuntime(item.active, item.track);
++    if (runtime && (runtime.source !== item.source || runtime.instanceId !== item.active.instanceId || (startedAtChanged && !resumingScene && !resumingGlobalPause))) {
++      removeRuntime(runtime); ensureRuntime(item.active, item.track);
+     } else if (!runtime) ensureRuntime(item.active, item.track);
+     else {
+-      runtime.scene = item.active.scene;
+-      runtime.track = item.track;
+-      runtime.startedAt = item.active.startedAt;
+-      runtime.paused = paused;
+-      applyVolume(runtime);
+-      syncPlayback(runtime);
++      const loopChanged = runtime.track.loop !== item.track.loop || runtime.track.delayMin !== item.track.delayMin || runtime.track.delayMax !== item.track.delayMax;
++      runtime.scene = item.active.scene; runtime.track = item.track; runtime.startedAt = item.active.startedAt; runtime.paused = paused;
++      if (runtime.audio) runtime.audio.loop = item.track.loop && item.track.delayMax === 0 && item.track.delayMin === 0;
++      if (loopChanged && runtime.repeatRemaining !== undefined) {
++        if (runtime.retry !== undefined) clearTimeout(runtime.retry);
++        runtime.retry = undefined; runtime.repeatRemaining = undefined;
++        if (item.track.loop) scheduleRepeat(runtime); else report(runtime, "ended");
++      }
++      applyVolume(runtime); syncPlayback(runtime); report(runtime, runtime.status, true);
+     }
+   }
+-  for (const runtime of runtimes.values()) if (!runtime.preview) syncPlayback(runtime);
+-}
+-
++}
+ function stopPreview() {
+-  preview = null;
+-  previewRevision += 1;
++  preview = null; previewRevision += 1;
+   for (const [key] of pendingRuntimes) if (key.startsWith("preview:")) pendingRuntimes.delete(key);
+   for (const runtime of [...runtimes.values()]) if (runtime.preview) removeRuntime(runtime, true);
+ }
+-
+ function previewScene(scene: Scene) {
+-  stopPreview();
+-  preview = scene;
+-  const session = previewRevision;
+-  const active = { scene, startedAt: Date.now() };
+-  for (const track of scene.tracks) ensureRuntime(active, track, true, session);
+-}
+-
++  stopPreview(); preview = scene;
++  for (const track of scene.tracks) ensureRuntime({ scene, startedAt: Date.now() }, track, true, previewRevision);
++}
+ async function unlock() {
+   const silence = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=");
+-  await silence.play().catch(() => undefined);
+-  silence.pause();
+-  audioUnlocked = true;
+-  for (const runtime of liveRuntimes) syncPlayback(runtime);
+-}
+-
++  await silence.play().catch(() => undefined); silence.pause(); audioUnlocked = true;
++  for (const runtime of liveRuntimes) { runtime.playbackRequested = undefined; syncPlayback(runtime); }
++}
+ OBR.onReady(async () => {
+-  audioUnlocked = false;
+-  loadMaster();
+-  role = await OBR.player.getRole();
+-  OBR.broadcast.onMessage(CHANNEL, ({ data }) => {
++  loadMaster(); role = await OBR.player.getRole();
++  const access = await syncAccess();
++  OBR.player.onChange(player => { role = player.role; reconcile(current); });
++  OBR.broadcast.onMessage(CHANNEL, ({ data, connectionId }) => {
+     if (!validSyncMessage(data)) return;
+-    const message = data;
+-    if (message.type === "STATE" && message.state.revision >= current.revision) reconcile(message.state);
+-    if (message.type === "REQUEST_STATE" && role === "GM") {
+-      void OBR.broadcast.sendMessage(CHANNEL, { type: "STATE", state: current } satisfies SyncMessage, { destination: "ALL" });
+-    }
+-  });
+-  OBR.broadcast.onMessage(LOCAL_CHANNEL, ({ data }) => {
+-    if (!validLocalMessage(data)) return;
+-    const message = data;
+-    if (message.type === "UNLOCK") void unlock();
+-    if (message.type === "PREVIEW") previewScene(message.scene);
+-    if (message.type === "STOP_PREVIEW") stopPreview();
+-    if (message.type === "MASTER") {
+-      if (message.revision === undefined && lastMasterRevision > 0) return;
+-      if (message.revision !== undefined && message.revision <= lastMasterRevision) return;
+-      if (message.revision !== undefined) lastMasterRevision = message.revision;
+-      rampMaster({ volume: message.volume, muted: message.muted });
++    if (data.type === "STATE" && access.gm(connectionId) && data.state.revision >= current.revision) reconcile(data.state);
++    if (data.type === "REQUEST_STATE" && role === "GM") void OBR.broadcast.sendMessage(CHANNEL, { type: "STATE", state: current } satisfies SyncMessage, { destination: "ALL" });
++  });
++  OBR.broadcast.onMessage(LOCAL_CHANNEL, ({ data, connectionId }) => {
++    if (!access.local(connectionId) || !validLocalMessage(data)) return;
++    if (data.type === "UNLOCK") void unlock();
++    if (data.type === "REQUEST_STATUS") for (const runtime of runtimes.values()) report(runtime, runtime.status, true);
++    if (data.type === "PREVIEW") previewScene(data.scene);
++    if (data.type === "STOP_PREVIEW") stopPreview();
++    if (data.type === "MASTER") {
++      if (data.revision === undefined && lastMasterRevision > 0) return;
++      if (data.revision !== undefined && data.revision <= lastMasterRevision) return;
++      if (data.revision !== undefined) lastMasterRevision = data.revision;
++      master = { volume: data.volume, muted: data.muted };
++      try { localStorage.setItem("ambient-forge-master", JSON.stringify(master)); } catch { /* volume still applies */ }
++      for (const runtime of liveRuntimes) applyVolume(runtime);
+     }
+   });
+   void OBR.broadcast.sendMessage(CHANNEL, { type: "REQUEST_STATE" } satisfies SyncMessage, { destination: "ALL" });
+--- a/src/buffered-audio.test.ts
++++ b/src/buffered-audio.test.ts
+@@ -0,0 +1,47 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { BufferedAudio, MAX_LOOP_BYTES } from "./buffered-audio";
++class FakeContext {
++  static latest: FakeContext;
++  state = "running"; currentTime = 0; destination = {};
++  sources: any[] = [];
++  constructor() { FakeContext.latest = this; }
++  createGain() { return { gain: { setValueAtTime: vi.fn() }, connect: vi.fn(), disconnect: vi.fn() }; }
++  async decodeAudioData() { return { duration: 2 }; }
++  async resume() { this.state = "running"; }
++  createBufferSource() {
++    const source = { buffer: undefined, loop: false, onended: null, connect: vi.fn(), disconnect: vi.fn(), start: vi.fn(), stop: vi.fn() };
++    this.sources.push(source); return source;
++  }
++}
++beforeEach(() => {
++  vi.stubGlobal("AudioContext", FakeContext);
++  vi.stubGlobal("fetch", vi.fn(async () => new Response(new Uint8Array([0, 1]))));
++});
++afterEach(() => vi.unstubAllGlobals());
++async function ready(audio: BufferedAudio) { await new Promise(resolve => audio.addEventListener("loadedmetadata", resolve, { once: true })); }
++describe("buffered seamless audio", () => {
++  it("uses a single looped source across many boundaries, without refetching", async () => {
++    const audio = new BufferedAudio("https://example.com/loop.wav"); await ready(audio); await audio.play();
++    const ctx = FakeContext.latest; expect(ctx.sources).toHaveLength(1); expect(ctx.sources[0].loop).toBe(true);
++    ctx.currentTime = 21; expect(audio.currentTime).toBe(1); expect(ctx.sources).toHaveLength(1); expect(fetch).toHaveBeenCalledTimes(1);
++    audio.removeAttribute("src"); expect(ctx.sources[0].stop).toHaveBeenCalledTimes(1);
++  });
++  it("pauses and resumes from the saved position with a new one-shot source node", async () => {
++    const audio = new BufferedAudio("https://example.com/loop.wav"); await ready(audio); await audio.play();
++    const ctx = FakeContext.latest, began = ctx.currentTime; ctx.currentTime = began + .75; audio.pause();
++    expect(audio.paused).toBe(true); expect(audio.currentTime).toBeCloseTo(.75);
++    await audio.play(); expect(ctx.sources.at(-1).start).toHaveBeenCalledWith(0, .75);
++    audio.removeAttribute("src");
++  });
++  it("does not start after an asynchronous resume was cancelled by stop", async () => {
++    const audio = new BufferedAudio("https://example.com/loop.wav"); await ready(audio);
++    const promise = audio.play(); audio.removeAttribute("src");
++    await expect(promise).rejects.toMatchObject({ name: "AbortError" }); expect(audio.paused).toBe(true);
++  });
++  it("fails visibly for files over the memory limit before decoding", async () => {
++    vi.stubGlobal("fetch", vi.fn(async () => new Response("large", { headers: { "content-length": String(MAX_LOOP_BYTES + 1) } })));
++    const audio = new BufferedAudio("https://example.com/large.wav");
++    await new Promise(resolve => audio.addEventListener("error", resolve, { once: true }));
++    expect(Number.isNaN(audio.duration)).toBe(true); audio.removeAttribute("src");
++  });
++});
+--- a/src/buffered-audio.ts
++++ b/src/buffered-audio.ts
+@@ -0,0 +1,104 @@
++/** Short audio loops are decoded once and repeated by the audio rendering thread.
++ * There is no ended→play timer/network round-trip at each boundary. */
++export const MAX_LOOP_BYTES = 12 * 1024 * 1024;
++export const MAX_LOOP_SECONDS = 120;
++let sharedContext: AudioContext | undefined;
++function context() { return sharedContext ??= new AudioContext(); }
++
++export class BufferedAudio extends EventTarget {
++  readonly preload = "auto";
++  readonly src: string;
++  private ctx: AudioContext;
++  private gain: GainNode;
++  private buffer?: AudioBuffer;
++  private source?: AudioBufferSourceNode;
++  private offset = 0;
++  private beganAt = 0;
++  private level = 1;
++  private silent = false;
++  private looping = true;
++  private destroyed = false;
++  private epoch = 0;
++  private controller = new AbortController();
++  constructor(url: string) {
++    super(); this.src = url; this.ctx = context();
++    this.gain = this.ctx.createGain(); this.gain.connect(this.ctx.destination);
++    void this.loadBuffer().catch(() => { if (!this.destroyed) this.dispatchEvent(new Event("error")); });
++  }
++  get duration() { return this.buffer?.duration ?? NaN; }
++  get paused() { return !this.source; }
++  get volume() { return this.level; }
++  set volume(value: number) { this.level = value; this.updateVolume(); }
++  get muted() { return this.silent; }
++  set muted(value: boolean) { this.silent = value; this.updateVolume(); }
++  get loop() { return this.looping; }
++  set loop(value: boolean) { this.looping = value; if (this.source) this.source.loop = value; }
++  get currentTime() {
++    const value = this.offset + (this.source ? this.ctx.currentTime - this.beganAt : 0);
++    return this.buffer ? (this.looping ? value % this.duration : Math.min(value, this.duration)) : value;
++  }
++  set currentTime(value: number) {
++    const playing = !this.paused;
++    this.stopSource(); this.offset = Math.max(0, value);
++    if (playing) this.startSource();
++  }
++  private updateVolume() { this.gain.gain.setValueAtTime(this.silent ? 0 : this.level, this.ctx.currentTime); }
++  private async loadBuffer() {
++    const timeout = setTimeout(() => this.controller.abort(), 30000);
++    try {
++      const response = await fetch(this.src, { signal: this.controller.signal, credentials: "omit" });
++      if (!response.ok || Number(response.headers.get("content-length")) > MAX_LOOP_BYTES || !response.body) throw new Error("Loop file unavailable or too large");
++      const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let size = 0;
++      try {
++        for (;;) {
++          const { value, done } = await reader.read(); if (done) break;
++          size += value.byteLength;
++          if (size > MAX_LOOP_BYTES) { await reader.cancel(); throw new Error("Loop exceeds 12 MiB"); }
++          chunks.push(value);
++        }
++      } finally { reader.releaseLock(); }
++      const bytes = new Uint8Array(size); let offset = 0;
++      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
++      if (this.destroyed) return;
++      const buffer = await this.ctx.decodeAudioData(bytes.buffer);
++      if (this.destroyed) return;
++      if (!buffer.duration || buffer.duration > MAX_LOOP_SECONDS) throw new Error("Loop exceeds two minutes");
++      this.buffer = buffer; this.dispatchEvent(new Event("loadedmetadata"));
++    } finally { clearTimeout(timeout); }
++  }
++  async play() {
++    const epoch = ++this.epoch;
++    if (this.destroyed || !this.buffer) throw new Error("Loop not loaded");
++    await this.ctx.resume();
++    if (this.destroyed || epoch !== this.epoch) throw new DOMException("Playback cancelled", "AbortError");
++    if (this.ctx.state !== "running") throw new DOMException("Click Enable audio", "NotAllowedError");
++    if (!this.source) this.startSource();
++  }
++  private startSource() {
++    if (!this.buffer || this.destroyed) return;
++    const source = this.ctx.createBufferSource();
++    source.buffer = this.buffer; source.loop = this.looping;
++    source.connect(this.gain); this.source = source; this.beganAt = this.ctx.currentTime;
++    this.offset = this.looping ? this.offset % this.duration : Math.min(this.offset, this.duration);
++    source.onended = () => {
++      if (this.source !== source || this.destroyed) return;
++      this.source = undefined; source.disconnect(); this.offset = this.duration;
++      this.dispatchEvent(new Event("ended"));
++    };
++    source.start(0, this.offset);
++    this.dispatchEvent(new Event("playing"));
++  }
++  private stopSource() {
++    const source = this.source; this.source = undefined;
++    if (source) { source.onended = null; source.stop(); source.disconnect(); }
++  }
++  pause() {
++    this.epoch++;
++    if (this.source) { this.offset = this.currentTime; this.stopSource(); this.dispatchEvent(new Event("pause")); }
++  }
++  removeAttribute(name: string) {
++    if (name !== "src") return;
++    this.pause(); this.destroyed = true; this.controller.abort(); this.gain.disconnect(); this.buffer = undefined;
++  }
++  load() { /* streaming HTMLAudioElement compatibility; disposal above is final */ }
++}
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -3,9 +3,11 @@
+ import emojiDataUrl from "emoji-picker-element-data/en/emojibase/data.json?url";
+ import "./style.css";
+ import {
+-  CHANNEL, LOCAL_CHANNEL, LIBRARY_LIMITS, Folder, Library, LocalMessage, PlaybackState,
+-  Scene, SourceKind, SyncMessage, Track, emptyState, normalizeAudioUrl, starterLibrary, validLocalMessage, validScene, validSourceUrl, validSyncMessage, youtubeId,
++  CHANNEL, LOCAL_CHANNEL, STATUS_CHANNEL, LIBRARY_LIMITS, Folder, Library, LocalMessage, PlaybackState, PlaybackFeedback,
++  Scene, SourceKind, SyncMessage, Track, emptyState, normalizeAudioUrl, starterLibrary, validLocalMessage, validPlaybackFeedback, validLibrary, validScene, validSourceUrl, validSyncMessage, youtubeId,
+ } from "./model";
++import { syncAccess } from "./sync-access";
++import { activeTracks, chooseRandom, replaceFolderScene, resumePlayback } from "./playback";
+ import { parseImportedLibrary } from "./importer";
+ import { loadLibrary, saveLibrary } from "./storage";
+ 
+@@ -18,7 +20,9 @@
+ let audioEnabled = false;
+ let previewSceneId: string | null = null;
+ let foldersCollapsed = false;
+-let masterSendFrame: number | undefined;
++let masterSendTimer: number | undefined;
++const feedback = new Map<string, PlaybackFeedback>();
++let sendQueue: Promise<void> = Promise.resolve();
+ let masterRevision = Date.now() * 1000;
+ const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+ 
+@@ -31,6 +35,7 @@
+ const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+ const pauseIcon = `<svg class="pause-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="3" width="4.5" height="14" rx="1.4"></rect><rect x="11.5" y="3" width="4.5" height="14" rx="1.4"></rect></svg>`;
+ const plusIcon = `<svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"></path></svg>`;
++const shuffleIcon = `<svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h2c3 0 5 8 8 8h2m-3-3 3 3-3 3M2 12h2c1.5 0 2.5-2 4-4s2.5-4 4-4h2m-3-3 3 3-3 3"></path></svg>`;
+ const importIcon = `<svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 11V2m0 0L4.5 5.5M8 2l3.5 3.5M3 9.5V14h10V9.5"></path></svg>`;
+ const exportIcon = `<svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v9m0 0 3.5-3.5M8 11 4.5 7.5M3 6.5V2h10v4.5"></path></svg>`;
+ const chevronIcon = (collapsed: boolean) => `<svg class="button-icon chevron-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="${collapsed ? "M6 3.5 10.5 8 6 12.5" : "M10 3.5 5.5 8l4.5 4.5"}"></path></svg>`;
+@@ -78,13 +83,13 @@
+ }
+ 
+ async function persist() {
+-  await saveLibrary(library);
++  try { await saveLibrary(library); } catch { toast("Could not save your library. Export a backup before closing.", true); }
+   render();
+ }
+ 
+ async function publish(next: PlaybackState) {
+   if (role !== "GM") return;
+-  const state = { ...next, version: 1 as const, revision: playback.revision + 1, updatedAt: Date.now() };
++  const state = { ...next, version: 1 as const, revision: Math.max(playback.revision + 1, Date.now() * 1000), updatedAt: Date.now() };
+   const message = { type: "STATE", state } satisfies SyncMessage;
+   if (!validSyncMessage(message)) {
+     toast("This active mix is too large to synchronize. Stop a scene or shorten its source URLs.", true);
+@@ -92,7 +97,10 @@
+   }
+   playback = state;
+   render();
+-  await OBR.broadcast.sendMessage(CHANNEL, message, { destination: "ALL" });
++  // Keep rapid A → B → stop A broadcasts in their intended order.
++  const send = sendQueue.then(() => OBR.broadcast.sendMessage(CHANNEL, message, { destination: "ALL" }));
++  sendQueue = send.catch(() => { toast("Audio sync failed. Check your connection and retry.", true); });
++  await sendQueue;
+ }
+ 
+ async function sendLocal(message: LocalMessage) {
+@@ -109,7 +117,9 @@
+   if (isActive(scene.id)) {
+     await publish({ ...playback, active: playback.active.filter(item => item.scene.id !== scene.id) });
+   } else {
+-    await publish({ ...playback, status: "playing", pausedAt: undefined, active: [...playback.active, { scene, startedAt: Date.now() + 250 }] });
++    const now = Date.now();
++    const resumed = playback.status === "paused" ? resumePlayback(playback, now) : playback;
++    await publish({ ...resumed, active: [...resumed.active, { scene, startedAt: now, instanceId: crypto.randomUUID() }] });
+   }
+ }
+ 
+@@ -117,13 +127,7 @@
+   if (playback.status === "playing") {
+     await publish({ ...playback, status: "paused", pausedAt: Date.now() });
+   } else {
+-    const pausedFor = playback.pausedAt ? Date.now() - playback.pausedAt : 0;
+-    await publish({
+-      ...playback,
+-      status: "playing",
+-      pausedAt: undefined,
+-      active: playback.active.map(item => item.pausedAt ? item : { ...item, startedAt: item.startedAt + pausedFor }),
+-    });
++    await publish(resumePlayback(playback, Date.now()));
+   }
+ }
+ 
+@@ -136,7 +140,7 @@
+     ...playback,
+     active: playback.active.map(item => {
+       if (item.scene.id !== sceneId) return item;
+-      if (!item.pausedAt) return { ...item, pausedAt: now };
++      if (item.pausedAt === undefined) return { ...item, pausedAt: now };
+       return { ...item, startedAt: item.startedAt + (now - item.pausedAt), pausedAt: undefined };
+     }),
+   });
+@@ -159,17 +163,22 @@
+ }
+ 
+ function queueMasterSync() {
+-  if (masterSendFrame !== undefined) return;
+-  masterSendFrame = requestAnimationFrame(() => {
+-    masterSendFrame = undefined;
+-    const revision = ++masterRevision;
+-    void sendLocal({ type: "MASTER", ...master, revision });
+-  });
+-}
++  if (masterSendTimer !== undefined) clearTimeout(masterSendTimer);
++  // Timers survive a hidden/closed popover; animation frames may be suspended.
++  masterSendTimer = window.setTimeout(() => {
++    masterSendTimer = undefined;
++    void sendLocal({ type: "MASTER", ...master, revision: ++masterRevision });
++  }, 30);
++}
++window.addEventListener("pagehide", () => {
++  if (masterSendTimer !== undefined) clearTimeout(masterSendTimer);
++  masterSendTimer = undefined;
++  void sendLocal({ type: "MASTER", ...master, revision: ++masterRevision });
++});
+ 
+ function setMaster(volume: number, muted = master.muted) {
+   master = { volume: Math.max(0, Math.min(100, volume)), muted };
+-  localStorage.setItem("ambient-forge-master", JSON.stringify(master));
++  try { localStorage.setItem("ambient-forge-master", JSON.stringify(master)); } catch { /* still apply volume */ }
+   updateMasterControls();
+   queueMasterSync();
+ }
+@@ -226,7 +235,7 @@
+         </div>
+       </header>
+       <section class="mixerbar">
+-        <div class="now-playing ${playback.active.length ? "" : "empty"}"><span class="pulse"></span><strong>${playback.status === "paused" ? "Paused:" : "Now playing:"}</strong><span class="now-playing-value">${activeNames.length ? activeNames.map(esc).join(" · ") : "Nothing"}</span></div>
++        <div class="now-playing ${playback.active.length ? "" : "empty"}"><span class="pulse"></span><strong>${playback.status === "paused" ? "Paused:" : "Selected mix:"}</strong><span class="now-playing-value">${activeNames.length ? activeNames.map(esc).join(" · ") : "Nothing"}</span></div>
+         <div class="master-volume"><button class="mute" id="mute" title="${master.muted ? "Unmute" : "Mute"} master volume">${master.muted || master.volume === 0 ? "🔇" : "🔊"}</button><input id="master-volume" aria-label="Master volume" type="range" min="0" max="100" value="${master.volume}" style="--range-value:${master.volume}%"><span class="volume-value">${master.volume}%</span></div>
+         ${isGm ? `<div class="scope"><button data-scope="GLOBAL" class="${playback.scope === "GLOBAL" ? "active" : ""}">🌐 Everyone</button><button data-scope="LOCAL" class="${playback.scope === "LOCAL" ? "active" : ""}">🎧 Only me</button></div>` : `<span class="scope-label">${playback.scope === "GLOBAL" ? "The GM is broadcasting audio" : "The GM is playing audio locally"}</span>`}
+       </section>
+@@ -238,7 +247,7 @@
+           <div class="library-actions"><button id="import" title="Import Ambient Forge, JSON, or Djinni library">${importIcon}<span>Import</span></button><button id="export">${exportIcon}<span>Export</span></button><button id="delete-all-scenes" class="delete-all-scenes">Delete all folders &amp; scenes</button><input id="import-file" type="file" accept=".aforge,.json,.djinni,.txt,application/json,text/plain" hidden></div>
+         </aside>
+         <section class="scenes">
+-          <div class="scene-heading"><div><span>Scenes</span><h2>${esc(currentFolder?.name || "No folder")}</h2></div><div class="heading-actions"><button id="edit-folder" class="secondary" ${currentFolder ? "" : "disabled"}>Folder settings</button><button id="add-scene" class="primary" ${currentFolder ? "" : "disabled"}>${plusIcon}<span>New scene</span></button></div></div>
++          <div class="scene-heading"><div><span>Scenes</span><h2>${esc(currentFolder?.name || "No folder")}</h2></div><div class="heading-actions"><button id="random-folder" class="secondary" title="Play one random scene from this folder; replace only scenes in this folder" ${scenes.length ? "" : "disabled"}>${shuffleIcon}<span>Random scene</span></button><button id="edit-folder" class="secondary" ${currentFolder ? "" : "disabled"}>Folder settings</button><button id="add-scene" class="primary" ${currentFolder ? "" : "disabled"}>${plusIcon}<span>New scene</span></button></div></div>
+           <div class="scene-grid">
+             ${scenes.length ? scenes.map(sceneCard).join("") : `<div class="blank"><div>♫</div><strong>No sound scenes here yet</strong><span>Create a scene and add music, rain, voices, or any other sounds.</span><button id="blank-add" class="primary">${plusIcon}<span>Create the first scene</span></button></div>`}
+           </div>
+@@ -252,7 +261,7 @@
+ }
+ 
+ function playerView() {
+-  return `<main class="player-view"><div class="player-orb ${playback.status}"><span>♫</span></div><h2>${playback.active.length ? `${playback.active.length} active scene${playback.active.length === 1 ? "" : "s"}` : "Waiting for audio"}</h2><p>${playback.scope === "LOCAL" ? "The GM selected local mode, so audio will be shared another way." : "Keep the extension open. This volume control affects only your browser."}</p></main>`;
++  return `<main class="player-view"><div class="player-orb ${playback.status}"><span>♫</span></div><h2>${playback.active.length ? playback.active.map(item => esc(sceneStatus(item.scene.id))).join(" · ") : "Waiting for audio"}</h2><p>${playback.scope === "LOCAL" ? "The GM selected local mode, so audio will be shared another way." : "Audio continues in the background. This volume control affects only your browser."}</p></main>`;
+ }
+ 
+ function sceneCard(scene: Scene) {
+@@ -261,10 +270,37 @@
+   const paused = activeScene?.pausedAt !== undefined;
+   return `<article class="scene-card ${active ? "active" : ""}" style="--accent:${esc(scene.color)}">
+     <button class="play-scene" data-play="${scene.id}"><span class="scene-icon">${esc(scene.icon || "♫")}</span><span class="play-mark">${active ? "■" : "▶"}</span></button>
+-    <div class="scene-info"><strong>${esc(scene.name)}</strong><span>${scene.tracks.length} track${scene.tracks.length === 1 ? "" : "s"}</span></div>
+-    <div class="scene-actions">${active ? `<button data-scene-pause="${scene.id}" title="${paused ? "Resume from saved position" : "Pause scene"}" ${playback.status === "paused" ? "disabled" : ""}>${paused ? "▶" : pauseIcon}</button>` : ""}<button class="edit-scene" data-edit="${scene.id}" title="Edit">✎</button><button data-delete="${scene.id}" title="Delete">×</button></div>
++    <div class="scene-info"><strong>${esc(scene.name)}</strong><span>${scene.tracks.length} track${scene.tracks.length === 1 ? "" : "s"}${activeScene ? ` · ${esc(sceneStatus(activeScene.scene.id))}` : ""}</span></div>
++    <div class="scene-actions"><button data-random-track="${scene.id}" title="Play one random unmuted track from this scene" aria-label="Random track from ${esc(scene.name)}">${shuffleIcon}</button>${active ? `<button data-scene-pause="${scene.id}" title="${paused ? "Resume from saved position" : "Pause scene"}" ${playback.status === "paused" ? "disabled" : ""}>${paused ? "▶" : pauseIcon}</button>` : ""}<button class="edit-scene" data-edit="${scene.id}" title="Edit">✎</button><button data-delete="${scene.id}" title="Delete">×</button></div>
+     <label class="scene-volume" title="Scene volume"><span>🔉</span><input data-scene-volume="${scene.id}" aria-label="Volume for ${esc(scene.name)}" type="range" min="0" max="100" value="${scene.volume}" style="--range-value:${scene.volume}%"><em data-scene-volume-value="${scene.id}">${scene.volume}%</em></label>
+   </article>`;
++}
++
++function sceneStatus(sceneId: string): string {
++  const active = playback.active.find(item => item.scene.id === sceneId);
++  if (!active) return "";
++  if (playback.status === "paused" || active.pausedAt !== undefined) return "Paused";
++  const tracks = activeTracks(active);
++  const statuses = tracks.map(track => {
++    const item = feedback.get(`${sceneId}:${track.id}`);
++    return item?.startedAt === active.startedAt ? item.status : "loading";
++  });
++  if (statuses.includes("blocked")) return "Blocked — click Enable audio";
++  if (statuses.includes("error")) return "Source error — check URL / CORS / loop size";
++  if (statuses.every(item => item === "playing")) return `Playing${active.trackId ? `: ${tracks[0]?.name || ""}` : ""}`;
++  if (statuses.every(item => item === "ended")) return "Finished";
++  if (statuses.includes("loading")) return "Loading…";
++  if (statuses.includes("waiting")) return "Waiting to repeat";
++  return "Paused by player — click Enable audio";
++}
++
++async function randomTrack(scene: Scene) {
++  const previous = playback.active.find(item => item.scene.id === scene.id)?.trackId;
++  const track = chooseRandom(scene.tracks.filter(item => !item.muted && item.url.trim()), previous);
++  if (!track) return toast("No unmuted tracks in this scene", true);
++  const now = Date.now();
++  const resumed = playback.status === "paused" ? resumePlayback(playback, now) : playback;
++  await publish({ ...resumed, active: [...resumed.active.filter(item => item.scene.id !== scene.id), { scene, startedAt: now, trackId: track.id, instanceId: crypto.randomUUID() }] });
+ }
+ 
+ function wireCommon() {
+@@ -277,6 +313,16 @@
+ }
+ 
+ function wireGm() {
++  byId<HTMLButtonElement>("random-folder").onclick = () => {
++    const candidates = library.scenes.filter(scene => scene.folderId === selectedFolder);
++    const previous = playback.active.find(item => item.scene.folderId === selectedFolder)?.scene.id;
++    const scene = chooseRandom(candidates, previous);
++    if (scene) void publish(replaceFolderScene(playback, scene, Date.now()));
++  };
++  document.querySelectorAll<HTMLButtonElement>("[data-random-track]").forEach(button => button.onclick = () => {
++    const scene = library.scenes.find(item => item.id === button.dataset.randomTrack);
++    if (scene) void randomTrack(scene);
++  });
+   byId<HTMLButtonElement>("pause").onclick = () => void togglePause();
+   byId<HTMLButtonElement>("stop-all").onclick = () => void publish({ ...playback, active: [], status: "playing", pausedAt: undefined });
+   document.querySelectorAll<HTMLButtonElement>("[data-scope]").forEach(button => button.onclick = () => void publish({ ...playback, scope: button.dataset.scope as "GLOBAL" | "LOCAL" }));
+@@ -315,9 +361,9 @@
+       if (!scene) return;
+       const updatedScene = { ...scene, volume };
+       library = { ...library, scenes: library.scenes.map(item => item.id === sceneId ? updatedScene : item) };
+-      await saveLibrary(library);
++      try { await saveLibrary(library); } catch { toast("Could not save volume. Export a backup before closing.", true); }
+       if (isActive(sceneId)) {
+-        await publish({ ...playback, active: playback.active.map(item => item.scene.id === sceneId ? { ...item, scene: updatedScene } : item) });
++        await publish({ ...playback, active: playback.active.map(item => item.scene.id === sceneId ? { ...item, scene: { ...item.scene, volume } } : item) });
+       } else if (previewSceneId === sceneId) {
+         await sendLocal({ type: "PREVIEW", scene: updatedScene });
+       }
+@@ -371,6 +417,7 @@
+     if (!folder || !confirm("Delete this folder and every scene inside it?")) return;
+     const removedIds = new Set(library.scenes.filter(s => s.folderId === folder.id).map(s => s.id));
+     library = { ...library, folders: library.folders.filter(f => f.id !== folder.id), scenes: library.scenes.filter(s => s.folderId !== folder.id) };
++    if (previewSceneId && removedIds.has(previewSceneId)) { previewSceneId = null; await sendLocal({ type: "STOP_PREVIEW" }); }
+     dialog.close(); await persist();
+     if ([...removedIds].some(isActive)) await publish({ ...playback, active: playback.active.filter(item => !removedIds.has(item.scene.id)) });
+   });
+@@ -394,7 +441,7 @@
+     byId<HTMLDivElement>("scene-editor").innerHTML = `
+       <div class="scene-fields">${emojiField("scene-icon", draft.icon, "Icon")}<label>Name<input id="scene-name" maxlength="50" value="${esc(draft.name)}"></label><label>Color<input id="scene-color" type="color" value="${draft.color}"></label></div>
+       <div class="settings-row"><label>Volume <b id="scene-volume-value">${draft.volume}%</b><input id="scene-volume-input" type="range" min="0" max="100" value="${draft.volume}" style="--range-value:${draft.volume}%"></label><label>Fade in, sec.${numberInput(`id="fade-in" min="0" max="30" step="0.5" value="${draft.fadeIn}"`, "Fade in")}</label><label>Fade out, sec.${numberInput(`id="fade-out" min="0" max="30" step="0.5" value="${draft.fadeOut}"`, "Fade out")}</label></div>
+-      <div class="tracks-title"><div><strong>Tracks</strong><span>MP3, OGG, WAV, Dropbox, or YouTube</span></div><button type="button" id="add-track" class="secondary">${plusIcon}<span>Add track</span></button></div>
++      <div class="tracks-title"><div><strong>Tracks</strong><span>Direct MP3 / OGG / WAV URLs, Dropbox share links, or YouTube. Upload your own files to a public host first.</span></div><button type="button" id="add-track" class="secondary">${plusIcon}<span>Add track</span></button></div>
+       <div class="track-list">${draft.tracks.map((track, index) => trackRow(track, index)).join("")}</div>
+       <div class="dialog-actions"><span></span><button value="cancel" class="secondary">Cancel</button><button type="button" id="save-scene" class="primary">Save scene</button></div>`;
+     wireDraft();
+@@ -414,6 +461,7 @@
+       track.volume = Number(row.querySelector<HTMLInputElement>("[data-field=volume]")!.value);
+       track.muted = row.querySelector<HTMLInputElement>("[data-field=muted]")!.checked;
+       track.loop = row.querySelector<HTMLInputElement>("[data-field=loop]")!.checked;
++      track.seamlessLoop = row.querySelector<HTMLInputElement>("[data-field=seamlessLoop]")!.checked;
+       track.delayMin = Number(row.querySelector<HTMLInputElement>("[data-field=delayMin]")!.value);
+       track.delayMax = Number(row.querySelector<HTMLInputElement>("[data-field=delayMax]")!.value);
+     });
+@@ -459,10 +507,13 @@
+       }
+       if (draft.tracks.some(track => !validSourceUrl(track.url))) return toast("Use a valid HTTP or HTTPS audio URL", true);
+       if (draft.tracks.some(track => track.kind === "youtube" && !youtubeId(track.url))) return toast("Use a valid YouTube URL", true);
++      if (draft.tracks.some(track => track.seamlessLoop && (!track.loop || track.delayMin !== 0 || track.delayMax !== 0 || !!youtubeId(track.url)))) return toast("Seamless loop needs a direct audio URL, Loop enabled and both Delays set to 0.", true);
+       if (!validScene(draft)) return toast("Check the scene fields and track settings", true);
+-      library = existing ? { ...library, scenes: library.scenes.map(scene => scene.id === existing.id ? draft : scene) } : { ...library, scenes: [...library.scenes, draft] };
++      const nextLibrary: Library = existing ? { ...library, scenes: library.scenes.map(scene => scene.id === existing.id ? draft : scene) } : { ...library, scenes: [...library.scenes, draft] };
++      if (!validLibrary(nextLibrary)) return toast(`A library can contain up to ${LIBRARY_LIMITS.totalTracks} total tracks.`, true);
++      library = nextLibrary;
+       dialog.close(); await persist();
+-      if (isActive(draft.id)) await publish({ ...playback, active: playback.active.map(item => item.scene.id === draft.id ? { ...item, scene: draft } : item) });
++      if (isActive(draft.id)) await publish({ ...playback, active: playback.active.map(item => item.scene.id === draft.id ? { ...item, scene: draft, trackId: draft.tracks.some(track => track.id === item.trackId) ? item.trackId : undefined } : item) });
+       if (normalizedDropboxLinks > 0) toast("Dropbox link prepared for playback");
+     };
+   };
+@@ -472,7 +523,7 @@
+ function trackRow(track: Track, index: number) {
+   return `<div class="track-row" data-track-row="${index}">
+     <div class="track-number">${index + 1}</div><div class="track-main"><div class="track-top"><input data-field="name" maxlength="80" value="${esc(track.name)}" placeholder="Name"><select data-field="kind"><option value="auto" ${track.kind === "auto" ? "selected" : ""}>Auto</option><option value="audio" ${track.kind === "audio" ? "selected" : ""}>Audio file</option><option value="youtube" ${track.kind === "youtube" ? "selected" : ""}>YouTube</option></select><button type="button" data-remove-track="${index}">×</button></div><input data-field="url" class="url" maxlength="2048" value="${esc(track.url)}" placeholder="https://…"></div>
+-    <div class="track-options"><label>Volume ${numberInput(`data-field="volume" min="0" max="100" value="${track.volume}"`, "Track volume")}</label><label class="check"><input data-field="muted" type="checkbox" ${track.muted ? "checked" : ""}> Mute</label><label class="check"><input data-field="loop" type="checkbox" ${track.loop ? "checked" : ""}> Loop</label><label>Delay ${numberInput(`data-field="delayMin" min="0" max="3600" value="${track.delayMin}"`, "Minimum delay")}—${numberInput(`data-field="delayMax" min="0" max="3600" value="${track.delayMax}"`, "Maximum delay")} sec.</label></div>
++    <div class="track-options"><label>Volume ${numberInput(`data-field="volume" min="0" max="100" value="${track.volume}"`, "Track volume")}</label><label class="check"><input data-field="muted" type="checkbox" ${track.muted ? "checked" : ""}> Mute</label><label class="check"><input data-field="loop" type="checkbox" ${track.loop ? "checked" : ""}> Loop</label><label class="check" title="Short direct audio only: up to 120 seconds / 12 MiB. Host must allow CORS. The source file must have no leading/trailing silence."><input data-field="seamlessLoop" type="checkbox" ${track.seamlessLoop ? "checked" : ""}> Seamless loop</label><label>Delay ${numberInput(`data-field="delayMin" min="0" max="3600" value="${track.delayMin}"`, "Minimum delay")}—${numberInput(`data-field="delayMax" min="0" max="3600" value="${track.delayMax}"`, "Maximum delay")} sec.</label></div>
+   </div>`;
+ }
+ 
+@@ -493,6 +544,7 @@
+ async function deleteScene(id: string) {
+   if (!confirm("Delete this scene?")) return;
+   library = { ...library, scenes: library.scenes.filter(scene => scene.id !== id) };
++  if (previewSceneId === id) { previewSceneId = null; await sendLocal({ type: "STOP_PREVIEW" }); }
+   await persist();
+   if (isActive(id)) await publish({ ...playback, active: playback.active.filter(item => item.scene.id !== id) });
+ }
+@@ -531,6 +583,9 @@
+     const data = parsed.library;
+     const previousSceneIds = new Set(library.scenes.map(scene => scene.id));
+     const firstImportedScene = data.scenes.find(scene => !previousSceneIds.has(scene.id));
++    await sendLocal({ type: "STOP_PREVIEW" });
++    previewSceneId = null;
++    if (playback.active.length) await publish({ ...playback, active: [] });
+     library = data;
+     selectedFolder = firstImportedScene?.folderId || library.scenes[0]?.folderId || library.folders[0]?.id || "";
+     await persist();
+@@ -546,12 +601,22 @@
+     await saveLibrary(library);
+   }
+   selectedFolder = library.folders[0]?.id || "";
+-  OBR.broadcast.onMessage(CHANNEL, ({ data }) => {
++  const access = await syncAccess();
++  OBR.player.onChange(player => { role = player.role; render(); });
++  OBR.broadcast.onMessage(CHANNEL, ({ data, connectionId }) => {
+     if (!validSyncMessage(data)) return;
+     const message = data;
+-    if (message.type === "STATE" && message.state.revision >= playback.revision) { playback = message.state; render(); }
++    if (message.type === "STATE" && access.gm(connectionId) && message.state.revision >= playback.revision) { playback = message.state; render(); }
++  });
++  OBR.broadcast.onMessage(STATUS_CHANNEL, ({ data, connectionId }) => {
++    if (!access.local(connectionId) || !validPlaybackFeedback(data)) return;
++    const active = playback.active.find(item => item.scene.id === data.sceneId && item.startedAt === data.startedAt);
++    if (!active) return;
++    feedback.set(`${data.sceneId}:${data.trackId}`, data);
++    render();
+   });
+   render();
++  void sendLocal({ type: "REQUEST_STATUS" });
+   setMaster(master.volume, master.muted);
+   void OBR.broadcast.sendMessage(CHANNEL, { type: "REQUEST_STATE" } satisfies SyncMessage, { destination: "ALL" });
+ }
+--- a/src/model.ts
++++ b/src/model.ts
+@@ -28,6 +28,7 @@
+   loop: boolean;
+   delayMin: number;
+   delayMax: number;
++  seamlessLoop?: boolean;
+ }
+ 
+ export interface Scene {
+@@ -59,6 +60,9 @@
+   scene: Scene;
+   startedAt: number;
+   pausedAt?: number;
++  /** A random-track launch plays only this track; omitted means layered mix. */
++  trackId?: string;
++  instanceId?: string;
+ }
+ 
+ export interface PlaybackState {
+@@ -79,6 +83,7 @@
+ export type SyncMessage = { type: "STATE"; state: PlaybackState } | { type: "REQUEST_STATE" };
+ export type LocalMessage =
+   | { type: "UNLOCK" }
++  | { type: "REQUEST_STATUS" }
+   | { type: "PREVIEW"; scene: Scene }
+   | { type: "STOP_PREVIEW" }
+   | { type: "MASTER"; volume: number; muted: boolean; revision?: number };
+@@ -140,15 +145,17 @@
+   } catch { return false; }
+ }
+ 
++function videoId(value: string | null | undefined): string | null { return value && /^[a-zA-Z0-9_-]{11}$/.test(value) ? value : null; }
++
+ export function youtubeId(url: string): string | null {
+   try {
+     const parsed = new URL(url);
+     const hostname = parsed.hostname.toLowerCase();
+-    if (hostname === "youtu.be") return parsed.pathname.slice(1).split("/")[0] || null;
++    if (hostname === "youtu.be") return videoId(parsed.pathname.slice(1).split("/")[0]);
+     if (hostname !== "youtube.com" && !hostname.endsWith(".youtube.com")) return null;
+-    if (parsed.pathname.startsWith("/shorts/")) return parsed.pathname.split("/")[2] || null;
+-    if (parsed.pathname.startsWith("/embed/")) return parsed.pathname.split("/")[2] || null;
+-    return parsed.searchParams.get("v");
++    if (parsed.pathname.startsWith("/shorts/")) return videoId(parsed.pathname.split("/")[2]);
++    if (parsed.pathname.startsWith("/embed/")) return videoId(parsed.pathname.split("/")[2]);
++    return videoId(parsed.searchParams.get("v"));
+   } catch { return null; }
+ }
+ 
+@@ -186,9 +193,12 @@
+     && validName(track.name)
+     && validSourceUrl(track.url)
+     && (track.kind === "auto" || track.kind === "audio" || track.kind === "youtube")
++    && (sourceKind(track as unknown as Track) !== "youtube" || !!youtubeId(track.url as string))
+     && numberInRange(track.volume, 0, 100)
+     && typeof track.muted === "boolean"
+     && typeof track.loop === "boolean"
++    && (track.seamlessLoop === undefined || typeof track.seamlessLoop === "boolean")
++    && (!track.seamlessLoop || (track.loop === true && track.delayMin === 0 && track.delayMax === 0 && sourceKind(track as unknown as Track) === "audio"))
+     && numberInRange(track.delayMin, 0, 3600)
+     && numberInRange(track.delayMax, 0, 3600);
+ }
+@@ -255,6 +265,8 @@
+     const active = record(value);
+     return !!active
+       && validScene(active.scene)
++      && (active.instanceId === undefined || validId(active.instanceId))
++      && (active.trackId === undefined || (validId(active.trackId) && (active.scene as Scene).tracks.some(track => track.id === active.trackId)))
+       && numberInRange(active.startedAt, 0, Number.MAX_SAFE_INTEGER)
+       && (active.pausedAt === undefined || numberInRange(active.pausedAt, 0, Number.MAX_SAFE_INTEGER));
+   });
+@@ -278,7 +290,7 @@
+ export function validLocalMessage(value: unknown): value is LocalMessage {
+   const message = record(value);
+   if (!message || typeof message.type !== "string" || syncMessageSize(value) > MAX_SYNC_MESSAGE_BYTES) return false;
+-  if (message.type === "UNLOCK" || message.type === "STOP_PREVIEW") return true;
++  if (message.type === "UNLOCK" || message.type === "STOP_PREVIEW" || message.type === "REQUEST_STATUS") return true;
+   if (message.type === "PREVIEW") return validScene(message.scene);
+   return message.type === "MASTER"
+     && numberInRange(message.volume, 0, 100)
+@@ -286,3 +298,19 @@
+     && (message.revision === undefined
+       || (Number.isSafeInteger(message.revision) && (message.revision as number) >= 0));
+ }
++
++export const STATUS_CHANNEL = `${EXTENSION_ID}/status`;
++export type AudioStatus = "loading" | "playing" | "paused" | "blocked" | "error" | "ended" | "waiting";
++export interface PlaybackFeedback {
++  type: "PLAYBACK_STATUS";
++  sceneId: string;
++  trackId: string;
++  startedAt: number;
++  status: AudioStatus;
++}
++export function validPlaybackFeedback(value: unknown): value is PlaybackFeedback {
++  const item = record(value);
++  return !!item && item.type === "PLAYBACK_STATUS" && validId(item.sceneId) && validId(item.trackId)
++    && numberInRange(item.startedAt, 0, Number.MAX_SAFE_INTEGER)
++    && ["loading", "playing", "paused", "blocked", "error", "ended", "waiting"].includes(String(item.status));
++}
+--- a/src/playback.test.ts
++++ b/src/playback.test.ts
+@@ -0,0 +1,31 @@
++import { describe, expect, it } from "vitest";
++import { chooseRandom, playbackOffset, replaceFolderScene, resumePlayback } from "./playback";
++import { Scene, emptyState } from "./model";
++const a = { id: "a", folderId: "music" } as Scene;
++const b = { id: "b", folderId: "music" } as Scene;
++const rain = { id: "rain", folderId: "ambience" } as Scene;
++describe("random launch and clocks", () => {
++  it("avoids an immediate repeat, handles singletons and empty playlists", () => {
++    expect(chooseRandom([a, b], "a", () => 0)).toBe(b);
++    expect(chooseRandom([a], "a", () => 0)).toBe(a);
++    expect(chooseRandom([], undefined, () => 0)).toBeUndefined();
++  });
++  it("changes only the music folder, preserving rain and its position", () => {
++    const state = { ...emptyState(), active: [{ scene: a, startedAt: 1 }, { scene: rain, startedAt: 2 }] };
++    expect(replaceFolderScene(state, b, 5000).active).toEqual([{ scene: rain, startedAt: 2 }, expect.objectContaining({ scene: b, startedAt: 5000 })]);
++  });
++  it("counts overlapping scene/global pauses only once", () => {
++    const state = { ...emptyState(), status: "paused" as const, pausedAt: 4000, active: [{ scene: a, startedAt: 1000, pausedAt: 3000 }] };
++    const resumed = resumePlayback(state, 8000);
++    expect(resumed.active[0].startedAt).toBe(5000);
++    expect(resumed.active[0].pausedAt).toBe(7000);
++    // Scene resumes at 9000: shift start by 9000 - 7000, leaving 2s elapsed.
++    expect(playbackOffset(7000, 9000, 60)).toBe(2);
++  });
++  it("wraps looped audio but clamps one-shots, and tolerates unknown/live duration", () => {
++    expect(playbackOffset(0, 130000, 60, true)).toBe(10);
++    expect(playbackOffset(0, 130000, 60, false)).toBe(60);
++    expect(playbackOffset(0, 130000, Infinity)).toBe(130);
++    expect(playbackOffset(2000, 1000, 60)).toBe(0);
++  });
++});
+--- a/src/playback.ts
++++ b/src/playback.ts
+@@ -0,0 +1,32 @@
++import { ActiveScene, PlaybackState, Scene, Track } from "./model";
++
++export function activeTracks(active: ActiveScene): Track[] {
++  return active.trackId ? active.scene.tracks.filter(track => track.id === active.trackId) : active.scene.tracks;
++}
++
++export function chooseRandom<T extends { id: string }>(items: T[], previousId?: string, random = Math.random): T | undefined {
++  const candidates = items.length > 1 ? items.filter(item => item.id !== previousId) : items;
++  return candidates[Math.min(candidates.length - 1, Math.floor(random() * candidates.length))];
++}
++
++// Pause intervals overlap. Moving both clocks avoids counting a global pause twice
++// when a scene was already paused before it began.
++export function resumePlayback(state: PlaybackState, now: number): PlaybackState {
++  const duration = state.pausedAt === undefined ? 0 : Math.max(0, now - state.pausedAt);
++  return {
++    ...state, status: "playing", pausedAt: undefined,
++    active: state.active.map(item => ({ ...item, startedAt: item.startedAt + duration,
++      pausedAt: item.pausedAt === undefined ? undefined : item.pausedAt + duration })),
++  };
++}
++
++export function playbackOffset(startedAt: number, now: number, duration?: number, loop = true): number {
++  const elapsed = Math.max(0, (now - startedAt) / 1000);
++  if (!duration || !Number.isFinite(duration) || duration <= 0) return elapsed;
++  return loop ? elapsed % duration : Math.min(elapsed, duration);
++}
++
++export function replaceFolderScene(state: PlaybackState, scene: Scene, now: number): PlaybackState {
++  const resumed = state.status === "paused" ? resumePlayback(state, now) : state;
++  return { ...resumed, active: [...resumed.active.filter(item => item.scene.folderId !== scene.folderId), { scene, startedAt: now, instanceId: crypto.randomUUID() }] };
++}
+--- a/src/storage.test.ts
++++ b/src/storage.test.ts
+@@ -0,0 +1,48 @@
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { starterLibrary } from "./model";
++afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
++describe("library persistence", () => {
++  it("loads the local backup when IndexedDB is empty, not just when it errors", async () => {
++    const library = starterLibrary(); library.folders[0].name = "Saved music";
++    vi.stubGlobal("localStorage", { getItem: () => JSON.stringify(library) });
++    vi.stubGlobal("indexedDB", { open: () => {
++      const open: any = {};
++      queueMicrotask(() => { open.result = { close: vi.fn(), transaction: () => ({ objectStore: () => ({ get: () => {
++        const request: any = {}; queueMicrotask(() => { request.result = undefined; request.onsuccess(); }); return request;
++      } }) }) }; open.onsuccess(); });
++      return open;
++    } });
++    const { loadLibrary } = await import("./storage"); expect(await loadLibrary()).toEqual(library);
++  });
++  it("still saves to IndexedDB if localStorage is full, and waits for commit", async () => {
++    vi.stubGlobal("localStorage", { setItem: () => { throw new Error("Quota"); } });
++    const committed: string[] = [];
++    vi.stubGlobal("indexedDB", { open: () => {
++      const open: any = {};
++      queueMicrotask(() => { open.result = { close: vi.fn(), transaction: () => {
++        const transaction: any = { objectStore: () => ({ put: (library: any) => {
++          setTimeout(() => { committed.push(library.library.folders[0].name); transaction.oncomplete(); }, 0);
++        } }) }; return transaction;
++      } }; open.onsuccess(); }); return open;
++    } });
++    const { saveLibrary } = await import("./storage"); const library = starterLibrary(); library.folders[0].name = "First";
++    const a = saveLibrary(library); library.folders[0].name = "Second"; const b = saveLibrary(library);
++    await Promise.all([a, b]); expect(committed).toEqual(["First", "Second"]);
++  });
++  it("prefers a newer fallback after an IndexedDB write failed", async () => {
++    const old = starterLibrary(), fresh = starterLibrary(); fresh.folders[0].name = "Newest";
++    vi.stubGlobal("localStorage", { getItem: () => JSON.stringify({ library: fresh, savedAt: 20 }) });
++    vi.stubGlobal("indexedDB", { open: () => {
++      const open: any = {};
++      queueMicrotask(() => { open.result = { close: vi.fn(), transaction: () => ({ objectStore: () => ({ get: () => {
++        const request: any = {}; queueMicrotask(() => { request.result = { library: old, savedAt: 10 }; request.onsuccess(); }); return request;
++      } }) }) }; open.onsuccess(); }); return open;
++    } });
++    const { loadLibrary } = await import("./storage"); expect(await loadLibrary()).toEqual(fresh);
++  });
++  it("rejects if both storage systems fail", async () => {
++    vi.stubGlobal("localStorage", { setItem: () => { throw new Error("Quota"); } });
++    vi.stubGlobal("indexedDB", { open: () => { throw new Error("Unavailable"); } });
++    const { saveLibrary } = await import("./storage"); await expect(saveLibrary(starterLibrary())).rejects.toThrow();
++  });
++});
+--- a/src/storage.ts
++++ b/src/storage.ts
+@@ -12,35 +12,56 @@
+     request.onerror = () => reject(request.error);
+   });
+ }
+-
++type Snapshot = { library: Library; savedAt: number };
++function snapshot(value: unknown): Snapshot | null {
++  if (validLibrary(value)) return { library: value, savedAt: 0 }; // migrate legacy storage lazily
++  if (!value || typeof value !== "object") return null;
++  const item = value as Partial<Snapshot>;
++  return validLibrary(item.library) && typeof item.savedAt === "number" && Number.isFinite(item.savedAt)
++    ? { library: item.library, savedAt: item.savedAt } : null;
++}
++function fallbackSnapshot(): Snapshot | null {
++  try { return snapshot(JSON.parse(localStorage.getItem(DB_NAME) || "null")); }
++  catch { return null; }
++}
+ export async function loadLibrary(): Promise<Library> {
++  let db: IDBDatabase | undefined;
++  const fallback = fallbackSnapshot();
+   try {
+-    const db = await openDb();
++    db = await openDb();
+     const value = await new Promise<unknown>((resolve, reject) => {
+-      const request = db.transaction(STORE_NAME).objectStore(STORE_NAME).get(KEY);
++      const request = db!.transaction(STORE_NAME).objectStore(STORE_NAME).get(KEY);
+       request.onsuccess = () => resolve(request.result);
+       request.onerror = () => reject(request.error);
+     });
+-    db.close();
+-    return validLibrary(value) ? value : starterLibrary();
+-  } catch {
+-    const fallback = localStorage.getItem(DB_NAME);
+-    if (fallback) {
+-      try { const value: unknown = JSON.parse(fallback); if (validLibrary(value)) return value; } catch { /* ignored */ }
+-    }
+-    return starterLibrary();
+-  }
++    const stored = snapshot(value);
++    if (fallback && (!stored || fallback.savedAt > stored.savedAt)) return fallback.library;
++    return stored?.library ?? fallback?.library ?? starterLibrary();
++  } catch { return fallback?.library ?? starterLibrary(); }
++  finally { db?.close(); }
+ }
+-
+-export async function saveLibrary(library: Library): Promise<void> {
+-  localStorage.setItem(DB_NAME, JSON.stringify(library));
+-  try {
+-    const db = await openDb();
+-    await new Promise<void>((resolve, reject) => {
+-      const request = db.transaction(STORE_NAME, "readwrite").objectStore(STORE_NAME).put(library, KEY);
+-      request.onsuccess = () => resolve();
+-      request.onerror = () => reject(request.error);
+-    });
+-    db.close();
+-  } catch { /* localStorage remains as fallback */ }
++let saveSequence = 0;
++let writes: Promise<void> = Promise.resolve();
++export function saveLibrary(library: Library): Promise<void> {
++  const captured = structuredClone(library);
++  const write = writes.catch(() => undefined).then(async () => {
++    const saved = { library: captured, savedAt: Date.now() * 1000 + (++saveSequence % 1000) };
++    let fallbackSaved = false;
++    try { localStorage.setItem(DB_NAME, JSON.stringify(saved)); fallbackSaved = true; } catch { /* IndexedDB may still work */ }
++    let db: IDBDatabase | undefined;
++    try {
++      db = await openDb();
++      await new Promise<void>((resolve, reject) => {
++        const transaction = db!.transaction(STORE_NAME, "readwrite");
++        transaction.objectStore(STORE_NAME).put(saved, KEY);
++        // A successful request does not guarantee a committed transaction.
++        transaction.oncomplete = () => resolve();
++        transaction.onerror = () => reject(transaction.error);
++        transaction.onabort = () => reject(transaction.error);
++      });
++    } catch (error) { if (!fallbackSaved) throw error; }
++    finally { db?.close(); }
++  });
++  writes = write;
++  return write;
+ }
+--- a/src/sync-access.ts
++++ b/src/sync-access.ts
+@@ -0,0 +1,17 @@
++import OBR from "@owlbear-rodeo/sdk";
++
++/** Broadcast validates shape, not authority. Trust local controls only from this
++ * connection, and room playback only from a connected GM. */
++export async function syncAccess() {
++  const [connectionId, role, players] = await Promise.all([
++    OBR.player.getConnectionId(), OBR.player.getRole(), OBR.party.getPlayers(),
++  ]);
++  let localRole = role;
++  let gmConnections = new Set(players.filter(player => player.role === "GM").map(player => player.connectionId));
++  OBR.party.onChange(next => { gmConnections = new Set(next.filter(player => player.role === "GM").map(player => player.connectionId)); });
++  OBR.player.onChange(player => { localRole = player.role; });
++  return {
++    local: (sender: string) => sender === connectionId,
++    gm: (sender: string) => sender === connectionId ? localRole === "GM" : gmConnections.has(sender),
++  };
++}
