@@ -34,6 +34,7 @@ let connectionId = "";
 let current = emptyState();
 let preview: Scene | null = null;
 let previewRevision = 0;
+let previewCommand = 0;
 let master = { volume: 80, muted: false };
 let lastMasterRevision = 0;
 let ytReady: Promise<void> | null = null;
@@ -50,9 +51,9 @@ function trackSource(track: Track) {
   return `${kind}:${track.seamlessLoop ? "buffer:" : ""}${kind === "audio" ? normalizeAudioUrl(track.url) : track.url.trim()}`;
 }
 function report(runtime: Runtime, status: AudioStatus, force = false) {
-  if (runtime.destroyed || runtime.retiring || runtime.preview || (!force && runtime.status === status)) return;
+  if (runtime.destroyed || runtime.retiring || (!force && runtime.status === status)) return;
   runtime.status = status;
-  const message: PlaybackFeedback = { type: "PLAYBACK_STATUS", sceneId: runtime.scene.id, trackId: runtime.track.id, startedAt: runtime.startedAt, status };
+  const message: PlaybackFeedback = { type: "PLAYBACK_STATUS", sceneId: runtime.scene.id, trackId: runtime.track.id, startedAt: runtime.startedAt, status, ...(runtime.preview ? { preview: true } : {}) };
   void OBR.broadcast.sendMessage(STATUS_CHANNEL, message, { destination: "LOCAL" }).catch(() => undefined);
 }
 function ensureYouTube(): Promise<void> {
@@ -372,8 +373,12 @@ OBR.onReady(async () => {
     if (!access.local(connectionId) || !validLocalMessage(data)) return;
     if (data.type === "UNLOCK") void unlock();
     if (data.type === "REQUEST_STATUS") for (const runtime of runtimes.values()) report(runtime, runtime.status, true);
-    if (data.type === "PREVIEW") previewScene(data.scene);
-    if (data.type === "STOP_PREVIEW") stopPreview();
+    if (data.type === "PREVIEW") {
+      const command = ++previewCommand;
+      if (audioUnlocked) previewScene(data.scene);
+      else void unlock().then(() => { if (command === previewCommand) previewScene(data.scene); });
+    }
+    if (data.type === "STOP_PREVIEW") { previewCommand++; stopPreview(); }
     if (data.type === "MASTER") {
       if (data.revision === undefined && lastMasterRevision > 0) return;
       if (data.revision !== undefined && data.revision <= lastMasterRevision) return;

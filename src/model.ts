@@ -315,10 +315,12 @@ export interface PlaybackFeedback {
   trackId: string;
   startedAt: number;
   status: AudioStatus;
+  preview?: boolean;
 }
 export function validPlaybackFeedback(value: unknown): value is PlaybackFeedback {
   const item = record(value);
   return !!item && item.type === "PLAYBACK_STATUS" && validId(item.sceneId) && validId(item.trackId)
+    && (item.preview === undefined || typeof item.preview === "boolean")
     && numberInRange(item.startedAt, 0, Number.MAX_SAFE_INTEGER)
     && ["loading", "playing", "paused", "blocked", "error", "ended", "waiting"].includes(String(item.status));
 }

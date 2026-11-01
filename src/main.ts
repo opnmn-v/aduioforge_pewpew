@@ -4,10 +4,10 @@ import emojiDataUrl from "emoji-picker-element-data/en/emojibase/data.json?url";
 import "./style.css";
 import {
   CHANNEL, LOCAL_CHANNEL, STATUS_CHANNEL, LIBRARY_LIMITS, Folder, Library, LocalMessage, PlaybackState, PlaybackFeedback,
-  Scene, SourceKind, SyncMessage, Track, emptyState, normalizeAudioUrl, starterLibrary, validLocalMessage, validPlaybackFeedback, validLibrary, validScene, validSourceUrl, validSyncMessage, youtubeId,
+  Scene, SyncMessage, Track, emptyState, normalizeAudioUrl, starterLibrary, validLocalMessage, validPlaybackFeedback, validLibrary, validScene, validSourceUrl, validSyncMessage, youtubeId,
 } from "./model";
 import { syncAccess } from "./sync-access";
-import { activeTracks, playlistNext, resumePlayback } from "./playback";
+import { activeTracks, playlistNext, playlistShuffle, resumePlayback } from "./playback";
 import { parseImportedLibrary } from "./importer";
 import { trackTitle } from "./track-title";
 import { loadLibrary, saveLibrary } from "./storage";
@@ -21,6 +21,7 @@ let selectedFolder = "";
 let master = { volume: 80, muted: false };
 let audioEnabled = false;
 let previewSceneId: string | null = null;
+let editorPreview: { stop: () => void; status: (data: PlaybackFeedback) => void } | undefined;
 let foldersCollapsed = false;
 let masterSendTimer: number | undefined;
 const feedback = new Map<string, PlaybackFeedback>();
@@ -173,6 +174,7 @@ function queueMasterSync() {
 window.addEventListener("pagehide", () => {
   if (masterSendTimer !== undefined) clearTimeout(masterSendTimer);
   masterSendTimer = undefined;
+  editorPreview?.stop();
   void sendLocal({ type: "MASTER", ...master, revision: ++masterRevision });
 });
 
@@ -271,7 +273,7 @@ function sceneCard(scene: Scene) {
   return `<article class="scene-card ${active ? "active" : ""}" style="--accent:${esc(scene.color)}">
     <button class="play-scene" data-play="${scene.id}"><span class="scene-icon">${esc(scene.icon || "♫")}</span><span class="play-mark">${active ? "■" : "▶"}</span></button>
     <div class="scene-info"><strong>${esc(scene.name)}</strong><span>${scene.tracks.length} track${scene.tracks.length === 1 ? "" : "s"}${activeScene ? ` · ${esc(sceneStatus(activeScene.scene.id))}` : ""}</span></div>
-    <div class="scene-actions"><button data-random-track="${scene.id}" title="Skip to the next shuffled track" aria-label="Next track in ${esc(scene.name)}">${shuffleIcon}</button>${active ? `<button data-scene-pause="${scene.id}" title="${paused ? "Resume from saved position" : "Pause scene"}" ${playback.status === "paused" ? "disabled" : ""}>${paused ? "▶" : pauseIcon}</button>` : ""}<button class="edit-scene" data-edit="${scene.id}" title="Edit">✎</button><button data-delete="${scene.id}" title="Delete">×</button></div>
+    <div class="scene-actions"><button data-next-track="${scene.id}" title="Next track" aria-label="Next track in ${esc(scene.name)}">⏭</button><button data-random-track="${scene.id}" title="Shuffle remaining tracks" aria-label="Shuffle tracks in ${esc(scene.name)}">${shuffleIcon}</button>${active ? `<button data-scene-pause="${scene.id}" title="${paused ? "Resume from saved position" : "Pause scene"}" ${playback.status === "paused" ? "disabled" : ""}>${paused ? "▶" : pauseIcon}</button>` : ""}<button class="edit-scene" data-edit="${scene.id}" title="Edit">✎</button><button data-delete="${scene.id}" title="Delete">×</button></div>
     <label class="scene-volume" title="Scene volume"><span>🔉</span><input data-scene-volume="${scene.id}" aria-label="Volume for ${esc(scene.name)}" type="range" min="0" max="100" value="${scene.volume}" style="--range-value:${scene.volume}%"><em data-scene-volume-value="${scene.id}">${scene.volume}%</em></label>
   </article>`;
 }
@@ -294,9 +296,9 @@ function sceneStatus(sceneId: string): string {
   return "Paused by player — click Enable audio";
 }
 
-async function randomTrack(scene: Scene) {
+async function randomTrack(scene: Scene, shuffle = false) {
   const previous = playback.active.find(item => item.scene.id === scene.id);
-  const active = playlistNext(scene, previous);
+  const active = (shuffle ? playlistShuffle : playlistNext)(scene, previous);
   if (!active) return toast("No unmuted tracks in this playlist", true);
   active.playlistOwner = connectionId;
   const resumed = playback.status === "paused" ? resumePlayback(playback, active.startedAt) : playback;
@@ -313,9 +315,13 @@ function wireCommon() {
 }
 
 function wireGm() {
+  document.querySelectorAll<HTMLButtonElement>("[data-next-track]").forEach(button => button.onclick = () => {
+    const scene = library.scenes.find(item => item.id === button.dataset.nextTrack);
+    if (scene) void randomTrack(scene);
+  });
   document.querySelectorAll<HTMLButtonElement>("[data-random-track]").forEach(button => button.onclick = () => {
     const scene = library.scenes.find(item => item.id === button.dataset.randomTrack);
-    if (scene) void randomTrack(scene);
+    if (scene) void randomTrack(scene, true);
   });
   byId<HTMLButtonElement>("pause").onclick = () => void togglePause();
   byId<HTMLButtonElement>("stop-all").onclick = () => void publish({ ...playback, active: [], status: "playing", pausedAt: undefined });
@@ -380,6 +386,7 @@ function wireGm() {
 }
 
 function dialogShell(title: string, body: string, wide = false) {
+  editorPreview?.stop();
   document.querySelector("dialog")?.remove();
   const dialog = document.createElement("dialog");
   dialog.className = wide ? "wide" : "";
@@ -434,7 +441,40 @@ function openSceneDialog(existing?: Scene) {
   const titleRequests = new Map<string, number>();
   const pendingTitles = new Set<Promise<void>>();
   const dialog = dialogShell(existing ? "Edit scene" : "New sound scene", `<div id="scene-editor"></div>`, true);
+  let listeningTrack: string | undefined;
+  let listeningScene: string | undefined;
+  let previewRequest = 0;
+  const updatePreviewButtons = () => {
+    dialog.querySelectorAll<HTMLButtonElement>("[data-preview-track]").forEach(button => {
+      const playing = button.dataset.previewTrack === listeningTrack;
+      button.textContent = playing ? "■" : "▶";
+      button.setAttribute("aria-pressed", String(playing));
+      button.title = playing ? "Stop preview" : "Listen to this track";
+    });
+  };
+  const previewController = {
+    stop: () => {
+      previewRequest++;
+      const wasListening = listeningTrack !== undefined;
+      listeningTrack = undefined; listeningScene = undefined;
+      updatePreviewButtons();
+      if (wasListening) void sendLocal({ type: "STOP_PREVIEW" });
+    },
+    status: (data: PlaybackFeedback) => {
+      if (data.sceneId !== listeningScene || data.trackId !== listeningTrack) return;
+      if (["ended", "error", "blocked"].includes(data.status)) {
+        previewController.stop();
+        if (data.status !== "ended") toast(data.status === "blocked" ? "Audio blocked — click Enable audio and try again" : "Could not preview this source. Check the URL and access to the file.", true);
+      }
+    },
+  };
+  editorPreview = previewController;
+  dialog.addEventListener("close", () => {
+    previewController.stop();
+    if (editorPreview === previewController) editorPreview = undefined;
+  });
   const draw = () => {
+    previewController.stop();
     byId<HTMLDivElement>("scene-editor").innerHTML = `
       <div class="scene-fields">${emojiField("scene-icon", draft.icon, "Icon")}<label>Name<input id="scene-name" maxlength="50" value="${esc(draft.name)}"></label><label>Color<input id="scene-color" type="color" value="${draft.color}"></label></div>
       <div class="settings-row"><label>Volume <b id="scene-volume-value">${draft.volume}%</b><input id="scene-volume-input" type="range" min="0" max="100" value="${draft.volume}" style="--range-value:${draft.volume}%"></label><label>Fade in, sec.${numberInput(`id="fade-in" min="0" max="30" step="0.5" value="${draft.fadeIn}"`, "Fade in")}</label><label>Fade out, sec.${numberInput(`id="fade-out" min="0" max="30" step="0.5" value="${draft.fadeOut}"`, "Fade out")}</label></div>
@@ -454,9 +494,9 @@ function openSceneDialog(existing?: Scene) {
       const track = draft.tracks[Number(row.dataset.trackRow)];
       track.name = row.querySelector<HTMLInputElement>("[data-field=name]")!.value;
       track.url = row.querySelector<HTMLInputElement>("[data-field=url]")!.value.trim();
-      track.kind = row.querySelector<HTMLSelectElement>("[data-field=kind]")!.value as SourceKind;
+      track.kind = "auto";
       track.volume = Number(row.querySelector<HTMLInputElement>("[data-field=volume]")!.value);
-      track.muted = row.querySelector<HTMLInputElement>("[data-field=muted]")!.checked;
+      track.muted = false;
       track.loop = false; track.seamlessLoop = false; track.delayMin = 0; track.delayMax = 0;
     });
   };
@@ -488,6 +528,28 @@ function openSceneDialog(existing?: Scene) {
       input.addEventListener("change", lookup);
       input.addEventListener("paste", () => window.setTimeout(lookup, 0));
     });
+    dialog.querySelectorAll<HTMLButtonElement>("[data-preview-track]").forEach(button => button.onclick = async () => {
+      const id = button.dataset.previewTrack!;
+      const wasListening = listeningTrack === id;
+      previewController.stop();
+      if (wasListening) return;
+      syncDraft();
+      const track = draft.tracks.find(item => item.id === id)!;
+      if (!validSourceUrl(track.url)) return toast("Enter a valid audio or YouTube URL first", true);
+      const scene: Scene = { ...draft, id: crypto.randomUUID(), name: draft.name.trim() || "Preview",
+        fadeIn: 0, fadeOut: 0, tracks: [{ ...track, name: track.name.trim() || "Preview", url: normalizeAudioUrl(track.url) }] };
+      if (!validScene(scene)) return toast("Check the track and scene settings before listening", true);
+      const request = ++previewRequest;
+      listeningTrack = id; listeningScene = scene.id; updatePreviewButtons();
+      try {
+        await sendLocal({ type: "PREVIEW", scene });
+      } catch {
+        if (request === previewRequest) { previewController.stop(); toast("Could not start local preview", true); }
+      }
+    });
+    dialog.querySelectorAll<HTMLInputElement>('[data-field="url"]').forEach(input => input.addEventListener("input", () => {
+      if (input.closest<HTMLElement>("[data-track-row]")?.querySelector<HTMLButtonElement>("[data-preview-track]")?.dataset.previewTrack === listeningTrack) previewController.stop();
+    }));
     byId<HTMLInputElement>("scene-volume-input").oninput = event => {
       const input = event.target as HTMLInputElement;
       input.style.setProperty("--range-value", `${input.value}%`);
@@ -504,6 +566,7 @@ function openSceneDialog(existing?: Scene) {
     };
     document.querySelectorAll<HTMLButtonElement>("[data-remove-track]").forEach(button => button.onclick = () => { syncDraft(); draft.tracks.splice(Number(button.dataset.removeTrack), 1); draw(); });
     byId<HTMLButtonElement>("save-scene").onclick = async () => {
+      previewController.stop();
       await Promise.allSettled([...pendingTitles]);
       if (!dialog.isConnected) return;
       syncDraft(); draft.name = draft.name.trim();
@@ -541,8 +604,8 @@ function openSceneDialog(existing?: Scene) {
 
 function trackRow(track: Track, index: number) {
   return `<div class="track-row" data-track-row="${index}">
-    <div class="track-number">${index + 1}</div><div class="track-main"><div class="track-top"><input data-field="name" maxlength="80" value="${esc(track.name)}" placeholder="Name"><select data-field="kind"><option value="auto" ${track.kind === "auto" ? "selected" : ""}>Auto</option><option value="audio" ${track.kind === "audio" ? "selected" : ""}>Audio file</option><option value="youtube" ${track.kind === "youtube" ? "selected" : ""}>YouTube</option></select><button type="button" data-remove-track="${index}">×</button></div><input data-field="url" class="url" maxlength="2048" value="${esc(track.url)}" placeholder="https://…"></div>
-    <div class="track-options"><label>Volume ${numberInput(`data-field="volume" min="0" max="100" value="${track.volume}"`, "Track volume")}</label><label class="check"><input data-field="muted" type="checkbox" ${track.muted ? "checked" : ""}> Mute</label><span>Tracks play once; the playlist repeats in shuffled order.</span></div>
+    <div class="track-number">${index + 1}</div><div class="track-main"><div class="track-top"><input data-field="name" maxlength="80" value="${esc(track.name)}" placeholder="Name"><button type="button" class="track-preview" data-preview-track="${track.id}" title="Listen to this track" aria-label="Preview ${esc(track.name)}" aria-pressed="false">▶</button><button type="button" data-remove-track="${index}">×</button></div><input data-field="url" class="url" maxlength="2048" value="${esc(track.url)}" placeholder="https://…"></div>
+    <div class="track-options"><label>Volume ${numberInput(`data-field="volume" min="0" max="100" value="${track.volume}"`, "Track volume")}</label></div>
   </div>`;
 }
 
@@ -630,6 +693,7 @@ async function startOwlbear() {
   });
   OBR.broadcast.onMessage(STATUS_CHANNEL, ({ data, connectionId }) => {
     if (!access.local(connectionId) || !validPlaybackFeedback(data)) return;
+    if (data.preview) { editorPreview?.status(data); return; }
     const active = playback.active.find(item => item.scene.id === data.sceneId && item.startedAt === data.startedAt);
     if (!active) return;
     feedback.set(`${data.sceneId}:${data.trackId}`, data);

@@ -38,3 +38,14 @@ export function playlistNext(scene: Scene, previous?: ActiveScene, now = Date.no
   const [trackId, ...playlistQueue] = queue;
   return { scene, startedAt: now, trackId, playlistQueue, playlistOwner: previous?.playlistOwner, instanceId: crypto.randomUUID() };
 }
+
+/** Shuffle only the unplayed remainder; Next keeps its established order. */
+export function playlistShuffle(scene: Scene, previous?: ActiveScene, now = Date.now(), random = Math.random): ActiveScene | undefined {
+  if (!previous?.playlistQueue?.length) return playlistNext(scene, previous, now, random);
+  const queue = [...previous.playlistQueue];
+  for (let i = queue.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [queue[i], queue[j]] = [queue[j], queue[i]];
+  }
+  return playlistNext(scene, { ...previous, playlistQueue: queue }, now, random);
+}

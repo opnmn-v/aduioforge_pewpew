@@ -332,3 +332,28 @@ describe("shuffled playlists in the background", () => {
     expect(first.destroyed).toBe(true);
   });
 });
+
+
+describe("editor track preview", () => {
+  it("plays locally, replaces the previous preview and stops without broadcasting playlist changes", async () => {
+    const firstScene = scene("a"); firstScene.tracks[0].loop = false;
+    local({ type: "PREVIEW", scene: firstScene }); await flush();
+    const first = FakeAudio.instances.find(audio => audio.src.endsWith("/a.mp3"))!;
+    first.emit("loadedmetadata"); expect(first.paused).toBe(false);
+    local({ type: "PREVIEW", scene: scene("b") }); await flush();
+    expect(first.paused).toBe(true);
+    const second = FakeAudio.instances.find(audio => audio.src.endsWith("/b.mp3"))!;
+    second.emit("loadedmetadata"); expect(second.paused).toBe(false);
+    local({ type: "STOP_PREVIEW" }); expect(second.paused).toBe(true);
+    expect(sdk.messages.some(message => message.data.type === "STATE")).toBe(false);
+    expect(sdk.messages.some(message => message.data.preview === true && message.data.status === "playing")).toBe(true);
+  });
+  it("reports preview completion and detects YouTube from the URL", async () => {
+    const s = scene("a", true); s.tracks[0].kind = "auto"; s.tracks[0].loop = false;
+    local({ type: "PREVIEW", scene: s }); await flush();
+    const player = FakeYouTubePlayer.instances[0]; player.onReady(); await flush();
+    player.events.onStateChange({ data: 0 }); await flush();
+    expect(sdk.messages.at(-1)?.data).toMatchObject({ preview: true, status: "ended", trackId: "a" });
+    local({ type: "STOP_PREVIEW" }); expect(player.destroyed).toBe(true);
+  });
+});

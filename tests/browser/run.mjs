@@ -63,6 +63,40 @@ try {
   await panel.locator('[data-random-track="B"]').click();
   await page.waitForFunction(id => window.__messages.filter(m => m.data.type === 'STATE').at(-1).data.state.active[0].trackId !== id, beforeSkip);
   await waitAudible();
+  const expectedNext = (await active()).playlistQueue[0];
+  const order = await panel.locator('.scene-actions').first().evaluate(node => [...node.children].map(button => button.hasAttribute('data-next-track') ? 'next' : button.hasAttribute('data-random-track') ? 'shuffle' : 'other'));
+  assert.deepEqual(order.slice(0, 2), ['next', 'shuffle']);
+  await panel.locator('[data-next-track="B"]').click();
+  await page.waitForFunction(id => window.__messages.filter(m => m.data.type === 'STATE').at(-1).data.state.active[0].trackId === id, expectedNext);
+  await waitAudible();
+  await panel.locator('#stop-all').click();
+  await bg.waitForFunction(() => window.__audio.filter(a => a.src.includes('tone.wav')).every(a => a.paused));
+  await panel.locator('[data-edit="B"]').click();
+  assert.equal(await panel.locator('dialog select, dialog [data-field="muted"]').count(), 0);
+  assert.equal(await panel.getByText('Tracks play once; the playlist repeats in shuffled order.').count(), 0);
+  const previewOne = panel.locator('[data-preview-track="B1"]');
+  const previewTwo = panel.locator('[data-preview-track="B2"]');
+  const statesBefore = await page.evaluate(() => window.__messages.filter(m => m.data.type === 'STATE').length);
+  await previewOne.click(); await waitAudible();
+  assert(await bg.evaluate(() => window.__audio.some(a => a.src.endsWith('?B1') && !a.paused)));
+  await previewTwo.click(); await waitAudible();
+  await bg.waitForFunction(() => window.__audio.some(a => a.src.endsWith('?B2') && !a.paused) && window.__audio.filter(a => a.src.endsWith('?B1')).every(a => a.paused));
+  await previewTwo.click();
+  await bg.waitForFunction(() => window.__audio.filter(a => a.src.includes('tone.wav')).every(a => a.paused));
+  await previewOne.click(); await waitAudible();
+  // A natural end resets the editor's preview button through local status feedback.
+  await endCurrent();
+  await page.waitForFunction(() => document.querySelector('#panel').contentDocument.querySelector('[data-preview-track="B1"]').getAttribute('aria-pressed') === 'false');
+  await previewOne.click(); await waitAudible();
+  await panel.locator('dialog .dialog-x').click();
+  await bg.waitForFunction(() => window.__audio.filter(a => a.src.includes('tone.wav')).every(a => a.paused));
+  assert.equal(await page.evaluate(() => window.__messages.filter(m => m.data.type === 'STATE').length), statesBefore);
+  await panel.locator('[data-edit="B"]').click();
+  await panel.locator('[data-preview-track="B1"]').click(); await waitAudible();
+  await panel.locator('#save-scene').click();
+  await panel.locator('dialog').waitFor({ state: 'detached' });
+  await bg.waitForFunction(() => window.__audio.filter(a => a.src.includes('tone.wav')).every(a => a.paused));
+  await panel.locator('[data-play="B"]').click(); await waitAudible();
   await panel.locator('#add-scene').click();
   const url = panel.locator('dialog [data-field="url"]'); const name = panel.locator('dialog [data-field="name"]');
   await url.fill('https://www.dropbox.com/scl/fi/abc/Night%20Rain.mp3?dl=0'); await url.dispatchEvent('change');
@@ -82,5 +116,5 @@ try {
   await page.locator('#panel').evaluate(frame => frame.remove()); await endCurrent();
   await page.waitForFunction(id => window.__messages.filter(m => m.data.type === 'STATE').at(-1).data.state.active[0].instanceId !== id, beforeClose);
   await waitAudible(); assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ result: 'PASS', checks: ['compact rows', 'no Random Scene', 'one audible track', 'natural ended advances without repeats', 'master volume', 'pause/resume', 'skip', 'Dropbox and YouTube names', 'manual name retained', 'closed-panel background continuation'], pageErrors: errors }));
+  console.log(JSON.stringify({ result: 'PASS', checks: ['compact rows', 'no Random Scene', 'one audible track', 'natural ended advances without repeats', 'master volume', 'pause/resume', 'next preserves queue; shuffle rearranges remainder', 'single-track local editor preview; switching/stopping/ending/closing/saving', 'automatic source detection; no Mute or playlist hint', 'Dropbox and YouTube names', 'manual name retained', 'closed-panel background continuation'], pageErrors: errors }));
 } finally { if (browser) await browser.close(); server.kill(); }

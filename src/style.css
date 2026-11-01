@@ -1351,3 +1351,7 @@ dialog.wide .dialog-actions {
 .scene-volume { grid-column: 2 / -1; padding: 0 10px 3px; margin: 0; }
 .scene-volume input[type="range"] { height: 16px; }
 .scene-card:hover { transform: none; }
+
+.track-top { grid-template-columns: minmax(0, 1fr) 36px 32px; }
+.track-preview[aria-pressed="true"] { background: #5a437e; color: #fff; }
+.scene-actions [data-next-track] { color: #ded3fa; }
