@@ -46,6 +46,8 @@ class FakeYouTubePlayer {
   muted = false;
   playCalls = 0;
   duration = 60;
+  currentTime = 0;
+  getCurrentTime() { return this.currentTime; }
   seeks: number[] = [];
   destroyed = false;
   pauseCalls = 0;
@@ -356,4 +358,25 @@ describe("editor track preview", () => {
     expect(sdk.messages.at(-1)?.data).toMatchObject({ preview: true, status: "ended", trackId: "a" });
     local({ type: "STOP_PREVIEW" }); expect(player.destroyed).toBe(true);
   });
+});
+
+it('seeks native audio to the configured start and ends the preview at the configured end', async () => {
+  const s = scene('a'); s.tracks[0] = { ...s.tracks[0], loop: false, startTime: 7, endTime: 20 };
+  local({ type: 'PREVIEW', scene: s }); await flush();
+  const audio = FakeAudio.instances.find(a => a.src.endsWith('/a.mp3'))!;
+  audio.emit('loadedmetadata'); expect(audio.currentTime).toBe(7);
+  audio.currentTime = 19; audio.emit('timeupdate'); expect(audio.paused).toBe(false);
+  audio.currentTime = 20; audio.emit('timeupdate'); expect(audio.paused).toBe(true);
+  expect(sdk.messages.at(-1)?.data).toMatchObject({ preview: true, status: 'ended' });
+});
+
+it('cuts YouTube at the specified media position, including after a pause', async () => {
+  const s = scene('a', true); s.tracks[0] = { ...s.tracks[0], loop: false, startTime: 7, endTime: 23 };
+  local({ type: 'PREVIEW', scene: s }); await flush();
+  const player = FakeYouTubePlayer.instances[0]; player.onReady(); await flush();
+  expect(player.seeks[0]).toBe(7);
+  player.currentTime = 22; vi.advanceTimersByTime(2000);
+  expect(sdk.messages.at(-1)?.data.status).not.toBe('ended');
+  player.currentTime = 23; vi.advanceTimersByTime(100);
+  expect(sdk.messages.at(-1)?.data).toMatchObject({ preview: true, status: 'ended' });
 });

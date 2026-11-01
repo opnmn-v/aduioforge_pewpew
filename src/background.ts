@@ -12,6 +12,7 @@ interface YTPlayer {
   setVolume(value: number): void; mute(): void; unMute(): void;
   seekTo(seconds: number, allowSeekAhead: boolean): void;
   getDuration(): number;
+  getCurrentTime(): number;
 }
 interface YTNamespace { Player: new (element: HTMLElement, options: Record<string, unknown>) => YTPlayer }
 declare global { interface Window { YT?: YTNamespace; onYouTubeIframeAPIReady?: () => void } }
@@ -19,6 +20,7 @@ declare global { interface Window { YT?: YTNamespace; onYouTubeIframeAPIReady?: 
 type Runtime = {
   key: string; instanceId?: string; scene: Scene; track: Track; startedAt: number; preview: boolean; source: string;
   audio?: HTMLAudioElement | BufferedAudio; player?: YTPlayer; host?: HTMLDivElement;
+  clipTimer?: number; clipEnded?: boolean;
   fade?: number; retry?: number; settle?: number; repeatAt?: number; repeatRemaining?: number;
   ready: boolean; gain: number; paused: boolean; playbackRequested?: boolean;
   retiring: boolean; destroyed: boolean; began?: boolean; sought?: boolean;
@@ -48,7 +50,7 @@ function loadMaster() {
 }
 function trackSource(track: Track) {
   const kind = sourceKind(track);
-  return `${kind}:${track.seamlessLoop ? "buffer:" : ""}${kind === "audio" ? normalizeAudioUrl(track.url) : track.url.trim()}`;
+  return `${track.startTime ?? 0}:${track.endTime ?? "end"}:${kind}:${track.seamlessLoop ? "buffer:" : ""}${kind === "audio" ? normalizeAudioUrl(track.url) : track.url.trim()}`;
 }
 function report(runtime: Runtime, status: AudioStatus, force = false) {
   if (runtime.destroyed || runtime.retiring || (!force && runtime.status === status)) return;
@@ -97,7 +99,10 @@ function seek(runtime: Runtime) {
   const duration = runtime.audio?.duration ?? runtime.player?.getDuration();
   // YouTube may report duration=0 until PLAYING. Defer seeking until known.
   if (!duration || !Number.isFinite(duration) || duration <= 0) return;
-  const offset = playbackOffset(runtime.startedAt, clock(runtime), duration, runtime.track.loop);
+  const start = runtime.track.startTime ?? 0;
+  const end = Math.min(runtime.track.endTime ?? duration, duration);
+  if (start >= end) { runtime.ready = false; report(runtime, "error"); return; }
+  const offset = start + playbackOffset(runtime.startedAt, clock(runtime), end - start, runtime.track.loop);
   runtime.sought = true;
   if (runtime.audio) runtime.audio.currentTime = offset;
   else runtime.player?.seekTo(offset, true);
@@ -150,10 +155,19 @@ function startFade(runtime: Runtime, from: number, to: number, duration: number,
   let lastTick = Date.now();
   runtime.fade = window.setInterval(tick, 40);
 }
+function checkClip(runtime: Runtime) {
+  if (runtime.destroyed || runtime.retiring || runtime.clipEnded || !runtime.ready || !shouldPlay(runtime) || runtime.track.endTime === undefined) return;
+  const position = runtime.audio?.currentTime ?? runtime.player?.getCurrentTime();
+  if (position === undefined || position < runtime.track.endTime) return;
+  runtime.clipEnded = true;
+  runtime.audio?.pause(); runtime.player?.pauseVideo();
+  scheduleRepeat(runtime);
+}
 function onPlaying(runtime: Runtime) {
   if (runtime.destroyed || runtime.retiring) return;
   if (!shouldPlay(runtime)) { runtime.playbackRequested = undefined; syncPlayback(runtime); return; }
   if (!runtime.sought) seek(runtime);
+  if (runtime.track.endTime !== undefined && runtime.clipTimer === undefined) runtime.clipTimer = window.setInterval(() => checkClip(runtime), 100);
   if (!runtime.began) {
     runtime.began = true;
     if (runtime.scene.fadeIn > 0) startFade(runtime, 0, 1, runtime.scene.fadeIn * 1000);
@@ -208,7 +222,8 @@ function createAudio(scene: Scene, track: Track, startedAt: number, key: string,
   audio.addEventListener("playing", () => onPlaying(runtime));
   audio.addEventListener("waiting", () => report(runtime, "loading"));
   audio.addEventListener("pause", () => report(runtime, "paused"));
-  audio.addEventListener("ended", () => scheduleRepeat(runtime));
+  audio.addEventListener("timeupdate", () => checkClip(runtime));
+  audio.addEventListener("ended", () => { if (!runtime.clipEnded) scheduleRepeat(runtime); });
   audio.addEventListener("error", () => { runtime.playbackRequested = undefined; report(runtime, "error"); });
   if (!(audio instanceof BufferedAudio)) audio.src = normalizeAudioUrl(track.url);
   applyVolume(runtime);
@@ -230,7 +245,7 @@ async function createYouTube(request: PendingRuntime): Promise<Runtime | null> {
   runtime.host = host; runtime.instanceId = active.instanceId;
   runtime.player = new window.YT!.Player(target, {
     videoId, width: 200, height: 200,
-    playerVars: { autoplay: 0, controls: 0, disablekb: 1, playsinline: 1, origin: location.origin },
+    playerVars: { start: track.startTime ?? 0, ...(track.endTime === undefined ? {} : { end: track.endTime }), autoplay: 0, controls: 0, disablekb: 1, playsinline: 1, origin: location.origin },
     events: {
       onReady: () => {
         if (runtime.destroyed) return;
@@ -241,7 +256,7 @@ async function createYouTube(request: PendingRuntime): Promise<Runtime | null> {
         if (event.data === 1) onPlaying(runtime);
         if (event.data === 3) report(runtime, "loading");
         if (event.data === 2) { runtime.playbackRequested = undefined; report(runtime, "paused"); }
-        if (event.data === 0) { runtime.playbackRequested = undefined; scheduleRepeat(runtime); }
+        if (event.data === 0 && !runtime.clipEnded) { runtime.playbackRequested = undefined; scheduleRepeat(runtime); }
       },
       onAutoplayBlocked: () => { runtime.playbackRequested = undefined; report(runtime, "blocked"); },
       onError: () => { runtime.playbackRequested = undefined; report(runtime, "error"); },
@@ -260,6 +275,7 @@ function requestIsCurrent(request: PendingRuntime) {
 function destroy(runtime: Runtime) {
   if (runtime.destroyed) return;
   runtime.destroyed = true;
+  if (runtime.clipTimer !== undefined) clearInterval(runtime.clipTimer);
   if (runtime.fade !== undefined) clearInterval(runtime.fade);
   if (runtime.retry !== undefined) clearTimeout(runtime.retry);
   if (runtime.settle !== undefined) clearTimeout(runtime.settle);

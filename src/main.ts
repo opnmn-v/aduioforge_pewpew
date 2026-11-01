@@ -9,6 +9,7 @@ import {
 import { syncAccess } from "./sync-access";
 import { activeTracks, playlistNext, playlistRandomNext, playlistShuffle, resumePlayback } from "./playback";
 import { parseImportedLibrary } from "./importer";
+import { parseTrackTime, formatTrackTime } from "./track-time";
 import { trackTitle } from "./track-title";
 import { loadLibrary, saveLibrary } from "./storage";
 
@@ -475,6 +476,8 @@ function openSceneDialog(existing?: Scene) {
   });
   const draw = () => {
     previewController.stop();
+    if (draft.tracks.length < LIBRARY_LIMITS.tracksPerScene && draft.tracks.at(-1)?.url.trim()) draft.tracks.push(newTrack());
+    if (!draft.tracks.length) draft.tracks.push(newTrack());
     byId<HTMLDivElement>("scene-editor").innerHTML = `
       <div class="scene-fields">${emojiField("scene-icon", draft.icon, "Icon")}<label>Name<input id="scene-name" maxlength="50" value="${esc(draft.name)}"></label><label>Color<input id="scene-color" type="color" value="${draft.color}"></label></div>
       <div class="settings-row"><label>Volume <b id="scene-volume-value">${draft.volume}%</b><input id="scene-volume-input" type="range" min="0" max="100" value="${draft.volume}" style="--range-value:${draft.volume}%"></label><label>Fade in, sec.${numberInput(`id="fade-in" min="0" max="30" step="0.5" value="${draft.fadeIn}"`, "Fade in")}</label><label>Fade out, sec.${numberInput(`id="fade-out" min="0" max="30" step="0.5" value="${draft.fadeOut}"`, "Fade out")}</label></div>
@@ -494,15 +497,17 @@ function openSceneDialog(existing?: Scene) {
       const track = draft.tracks[Number(row.dataset.trackRow)];
       track.name = row.querySelector<HTMLInputElement>("[data-field=name]")!.value;
       track.url = row.querySelector<HTMLInputElement>("[data-field=url]")!.value.trim();
+      track.startTime = parseTrackTime(row.querySelector<HTMLInputElement>('[data-field="startTime"]')!.value);
+      track.endTime = parseTrackTime(row.querySelector<HTMLInputElement>('[data-field="endTime"]')!.value);
       track.kind = "auto";
       track.volume = Number(row.querySelector<HTMLInputElement>("[data-field=volume]")!.value);
       track.muted = false;
       track.loop = false; track.seamlessLoop = false; track.delayMin = 0; track.delayMax = 0;
     });
   };
-  const wireDraft = () => {
-    wireEmojiPickers(dialog);
-    wireNumberSteppers(dialog);
+  const wireDraft = (scope: ParentNode = dialog) => {
+    if (scope === dialog) wireEmojiPickers(dialog);
+    wireNumberSteppers(scope);
     const updateTitle = async (input: HTMLInputElement) => {
       const row = input.closest<HTMLElement>("[data-track-row]")!;
       const track = draft.tracks[Number(row.dataset.trackRow)];
@@ -519,16 +524,24 @@ function openSceneDialog(existing?: Scene) {
       autoNames.set(track.id, title);
       track.name = title;
     };
-    document.querySelectorAll<HTMLInputElement>("[data-field=url]").forEach(input => {
+    scope.querySelectorAll<HTMLInputElement>("[data-field=url]").forEach(input => {
       const lookup = () => {
         const pending = updateTitle(input);
         pendingTitles.add(pending);
         void pending.finally(() => pendingTitles.delete(pending));
       };
+      input.addEventListener("input", () => {
+        const row = input.closest<HTMLElement>("[data-track-row]")!;
+        if (!input.value.trim() || Number(row.dataset.trackRow) !== draft.tracks.length - 1 || draft.tracks.length >= LIBRARY_LIMITS.tracksPerScene) return;
+        syncDraft(); draft.tracks.push(newTrack());
+        const list = dialog.querySelector(".track-list")!;
+        list.insertAdjacentHTML("beforeend", trackRow(draft.tracks.at(-1)!, draft.tracks.length - 1));
+        wireDraft(list.lastElementChild!);
+      });
       input.addEventListener("change", lookup);
       input.addEventListener("paste", () => window.setTimeout(lookup, 0));
     });
-    dialog.querySelectorAll<HTMLButtonElement>("[data-preview-track]").forEach(button => button.onclick = async () => {
+    scope.querySelectorAll<HTMLButtonElement>("[data-preview-track]").forEach(button => button.onclick = async () => {
       const id = button.dataset.previewTrack!;
       const wasListening = listeningTrack === id;
       previewController.stop();
@@ -547,7 +560,7 @@ function openSceneDialog(existing?: Scene) {
         if (request === previewRequest) { previewController.stop(); toast("Could not start local preview", true); }
       }
     });
-    dialog.querySelectorAll<HTMLInputElement>('[data-field="url"]').forEach(input => input.addEventListener("input", () => {
+    scope.querySelectorAll<HTMLInputElement>('[data-field="url"]').forEach(input => input.addEventListener("input", () => {
       if (input.closest<HTMLElement>("[data-track-row]")?.querySelector<HTMLButtonElement>("[data-preview-track]")?.dataset.previewTrack === listeningTrack) previewController.stop();
     }));
     byId<HTMLInputElement>("scene-volume-input").oninput = event => {
@@ -564,34 +577,35 @@ function openSceneDialog(existing?: Scene) {
       draft.tracks.push(newTrack());
       draw();
     };
-    document.querySelectorAll<HTMLButtonElement>("[data-remove-track]").forEach(button => button.onclick = () => { syncDraft(); draft.tracks.splice(Number(button.dataset.removeTrack), 1); draw(); });
+    scope.querySelectorAll<HTMLButtonElement>("[data-remove-track]").forEach(button => button.onclick = () => { syncDraft(); draft.tracks.splice(Number(button.dataset.removeTrack), 1); draw(); });
     byId<HTMLButtonElement>("save-scene").onclick = async () => {
       previewController.stop();
       await Promise.allSettled([...pendingTitles]);
       if (!dialog.isConnected) return;
       syncDraft(); draft.name = draft.name.trim();
-      if (!draft.name) return toast("Enter a scene name", true);
-      if (!draft.tracks.length || draft.tracks.some(track => !track.url)) return toast("Every track needs a URL", true);
+      const completeDraft = { ...draft, tracks: draft.tracks.filter(track => track.url.trim()) };
+      if (!completeDraft.name) return toast("Enter a scene name", true);
+      if (!completeDraft.tracks.length || completeDraft.tracks.some(track => !track.url)) return toast("Every track needs a URL", true);
       let normalizedDropboxLinks = 0;
-      for (const track of draft.tracks) {
+      for (const track of completeDraft.tracks) {
         const normalized = normalizeAudioUrl(track.url);
         if (normalized !== track.url) normalizedDropboxLinks += 1;
         track.url = normalized;
       }
-      if (draft.tracks.some(track => !validSourceUrl(track.url))) return toast("Use a valid HTTP or HTTPS audio URL", true);
-      if (draft.tracks.some(track => track.kind === "youtube" && !youtubeId(track.url))) return toast("Use a valid YouTube URL", true);
-      if (!validScene(draft)) return toast("Check the scene fields and track settings", true);
-      const nextLibrary: Library = existing ? { ...library, scenes: library.scenes.map(scene => scene.id === existing.id ? draft : scene) } : { ...library, scenes: [...library.scenes, draft] };
+      if (completeDraft.tracks.some(track => !validSourceUrl(track.url))) return toast("Use a valid HTTP or HTTPS audio URL", true);
+      if (completeDraft.tracks.some(track => track.kind === "youtube" && !youtubeId(track.url))) return toast("Use a valid YouTube URL", true);
+      if (!validScene(completeDraft)) return toast("Check track times: use mm:ss, with End after Start, and valid track settings", true);
+      const nextLibrary: Library = existing ? { ...library, scenes: library.scenes.map(scene => scene.id === existing.id ? completeDraft : scene) } : { ...library, scenes: [...library.scenes, completeDraft] };
       if (!validLibrary(nextLibrary)) return toast(`A library can contain up to ${LIBRARY_LIMITS.totalTracks} total tracks.`, true);
       library = nextLibrary;
       dialog.close(); await persist();
-      if (isActive(draft.id)) {
+      if (isActive(completeDraft.id)) {
         const active = playback.active.flatMap(item => {
-          if (item.scene.id !== draft.id) return [item];
-          if (item.playlistQueue && draft.tracks.some(track => track.id === item.trackId && !track.muted)) {
-            return [{ ...item, scene: draft, playlistQueue: item.playlistQueue.filter(id => draft.tracks.some(track => track.id === id && !track.muted)) }];
+          if (item.scene.id !== completeDraft.id) return [item];
+          if (item.playlistQueue && completeDraft.tracks.some(track => track.id === item.trackId && !track.muted)) {
+            return [{ ...item, scene: completeDraft, playlistQueue: item.playlistQueue.filter(id => completeDraft.tracks.some(track => track.id === id && !track.muted)) }];
           }
-          const next = playlistNext(draft);
+          const next = playlistNext(completeDraft);
           return next ? [{ ...next, playlistOwner: connectionId }] : [];
         });
         await publish({ ...playback, active });
@@ -605,7 +619,7 @@ function openSceneDialog(existing?: Scene) {
 function trackRow(track: Track, index: number) {
   return `<div class="track-row" data-track-row="${index}">
     <div class="track-number">${index + 1}</div><div class="track-main"><div class="track-top"><input data-field="name" maxlength="80" value="${esc(track.name)}" placeholder="Name"><button type="button" class="track-preview" data-preview-track="${track.id}" title="Listen to this track" aria-label="Preview ${esc(track.name)}" aria-pressed="false">▶</button><button type="button" data-remove-track="${index}">×</button></div><input data-field="url" class="url" maxlength="2048" value="${esc(track.url)}" placeholder="https://…"></div>
-    <div class="track-options"><label>Volume ${numberInput(`data-field="volume" min="0" max="100" value="${track.volume}"`, "Track volume")}</label></div>
+    <div class="track-options"><label>Start<input data-field="startTime" aria-label="Start time" placeholder="0:00" value="${formatTrackTime(track.startTime)}"></label><label>End<input data-field="endTime" aria-label="End time" placeholder="To end" value="${formatTrackTime(track.endTime)}"></label><label>Volume ${numberInput(`data-field="volume" min="0" max="100" value="${track.volume}"`, "Track volume")}</label></div>
   </div>`;
 }
 

@@ -31,7 +31,12 @@ try {
   // Synthetic 10-second silent WAV: real audio events, no external media dependency.
   const rate = 8000, length = rate * 10, wav = Buffer.alloc(44 + length * 2);
   wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(rate, 24); wav.writeUInt32LE(rate * 2, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(length * 2, 40);
-  await page.route('**/tone.wav?*', route => route.fulfill({ contentType: 'audio/wav', body: wav }));
+  await page.route('**/tone.wav?*', route => {
+    const range = route.request().headers()['range'];
+    if (!range) return route.fulfill({ contentType: 'audio/wav', headers: { 'accept-ranges': 'bytes' }, body: wav });
+    const start = Number(range.match(/bytes=(\d+)/)?.[1] || 0);
+    return route.fulfill({ status: 206, contentType: 'audio/wav', headers: { 'accept-ranges': 'bytes', 'content-range': `bytes ${start}-${wav.length - 1}/${wav.length}` }, body: wav.subarray(start) });
+  });
   await page.route('https://www.youtube.com/oembed?*', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ title: 'YouTube fixture title' }) }));
   await page.goto(`${origin}/tests/browser/host.html`);
   const panel = page.frameLocator('#panel');
@@ -75,6 +80,8 @@ try {
   await panel.locator('[data-edit="B"]').click();
   assert.equal(await panel.locator('dialog select, dialog [data-field="muted"]').count(), 0);
   assert.equal(await panel.getByText('Tracks play once; the playlist repeats in shuffled order.').count(), 0);
+  await panel.locator('dialog [data-field="startTime"]').first().fill('0:01');
+  await panel.locator('dialog [data-field="endTime"]').first().fill('0:03');
   const previewOne = panel.locator('[data-preview-track="B1"]');
   const previewTwo = panel.locator('[data-preview-track="B2"]');
   const statesBefore = await page.evaluate(() => window.__messages.filter(m => m.data.type === 'STATE').length);
@@ -85,6 +92,7 @@ try {
   await previewTwo.click();
   await bg.waitForFunction(() => window.__audio.filter(a => a.src.includes('tone.wav')).every(a => a.paused));
   await previewOne.click(); await waitAudible();
+  await bg.waitForFunction(() => window.__audio.some(a => a.src.endsWith('?B1') && !a.paused && a.currentTime >= 1));
   // A natural end resets the editor's preview button through local status feedback.
   await endCurrent();
   await page.waitForFunction(() => document.querySelector('#panel').contentDocument.querySelector('[data-preview-track="B1"]').getAttribute('aria-pressed') === 'false');
@@ -99,8 +107,9 @@ try {
   await bg.waitForFunction(() => window.__audio.filter(a => a.src.includes('tone.wav')).every(a => a.paused));
   await panel.locator('[data-play="B"]').click(); await waitAudible();
   await panel.locator('#add-scene').click();
-  const url = panel.locator('dialog [data-field="url"]'); const name = panel.locator('dialog [data-field="name"]');
+  const url = panel.locator('dialog [data-field="url"]').first(); const name = panel.locator('dialog [data-field="name"]').first();
   await url.fill('https://www.dropbox.com/scl/fi/abc/Night%20Rain.mp3?dl=0'); await url.dispatchEvent('change');
+  assert.equal(await panel.locator('dialog [data-track-row]').count(), 2);
   await name.waitFor(); await page.waitForFunction(() => document.querySelector('#panel').contentDocument.querySelector('[data-field="name"]').value === 'Night Rain');
   await name.fill('New track'); await url.fill('https://youtu.be/abcdefghijk'); await url.dispatchEvent('change');
   await page.waitForFunction(() => document.querySelector('#panel').contentDocument.querySelector('[data-field="name"]').value === 'YouTube fixture title');

@@ -29,6 +29,8 @@ export interface Track {
   delayMin: number;
   delayMax: number;
   seamlessLoop?: boolean;
+  startTime?: number;
+  endTime?: number;
 }
 
 export interface Scene {
@@ -199,6 +201,8 @@ function validTrack(value: unknown): value is Track {
     && numberInRange(track.volume, 0, 100)
     && typeof track.muted === "boolean"
     && typeof track.loop === "boolean"
+    && (track.startTime === undefined || numberInRange(track.startTime, 0, 604800))
+    && (track.endTime === undefined || (numberInRange(track.endTime, 0, 604800) && (track.endTime as number) > ((track.startTime as number | undefined) ?? 0)))
     && (track.seamlessLoop === undefined || typeof track.seamlessLoop === "boolean")
     && (!track.seamlessLoop || (track.loop === true && track.delayMin === 0 && track.delayMax === 0 && sourceKind(track as unknown as Track) === "audio"))
     && numberInRange(track.delayMin, 0, 3600)

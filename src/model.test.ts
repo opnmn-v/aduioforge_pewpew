@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LIBRARY_LIMITS, MAX_SYNC_MESSAGE_BYTES, Library, PlaybackState, Scene, masterShouldMute, normalizeAudioUrl, syncMessageSize,
-  validLibrary, validLocalMessage, validPlaybackState, validSourceUrl, validSyncMessage,
+  validScene, validLibrary, validLocalMessage, validPlaybackState, validSourceUrl, validSyncMessage,
 } from "./model";
 
 const folder = { id: "folder-1", name: "Forest", color: "#20aa70", icon: "🌲" };
@@ -88,4 +88,13 @@ describe("message validation", () => {
     expect(syncMessageSize(oversized)).toBeGreaterThan(MAX_SYNC_MESSAGE_BYTES);
     expect(validSyncMessage(oversized)).toBe(false);
   });
+});
+
+it('validates optional clip boundaries without breaking old libraries', () => {
+  expect(validScene(scene)).toBe(true);
+  const clip = (startTime: number, endTime: number) => ({ ...scene, tracks: [{ ...scene.tracks[0], startTime, endTime }] });
+  expect(validScene(clip(30, 423))).toBe(true);
+  expect(validScene(clip(423, 30))).toBe(false);
+  expect(validScene(clip(-1, 30))).toBe(false);
+  expect(validScene(clip(30, NaN))).toBe(false);
 });

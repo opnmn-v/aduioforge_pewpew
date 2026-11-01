@@ -25,6 +25,8 @@ The `Deploy GitHub Pages` workflow tests and builds the app, then publishes a ro
 - Play one unmuted track per scene, in shuffled order without repeats until the playlist finishes; then start a new shuffled cycle.
 - Continue to the next track in the background even while the panel is closed. Next randomly picks an unplayed track; Shuffle resets the entire playlist and starts a new shuffled cycle.
 - Preview individual tracks locally in the scene editor; the source type is detected from the URL.
+- Set optional Start and End positions (for example, `7:03`) for audio files and YouTube. End is a position in the original source, not a duration.
+- Paste into the trailing empty track row to add tracks without clicking Add track; unused empty rows are not saved.
 - Fill track names from Dropbox filenames or YouTube titles (when YouTube metadata is accessible), while keeping manual editing.
 - Organize scenes into colored folders with custom emoji icons.
 - Play direct MP3, OGG, WAV, and YouTube sources.

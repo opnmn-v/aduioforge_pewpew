@@ -1355,3 +1355,14 @@ dialog.wide .dialog-actions {
 .track-top { grid-template-columns: minmax(0, 1fr) 36px 32px; }
 .track-preview[aria-pressed="true"] { background: #5a437e; color: #fff; }
 .scene-actions [data-next-track] { color: #ded3fa; }
+
+/* Dense editor with a permanent trailing track row. */
+dialog.wide { width: min(680px, calc(100vw - 16px)); }
+dialog.wide form { padding: 12px; }
+dialog.wide .dialog-head { margin-bottom: 10px; }
+.track-list { gap: 7px; }
+.track-row { padding: 9px; gap: 6px; }
+.track-options { gap: 8px; }
+.track-options input[data-field="startTime"], .track-options input[data-field="endTime"] { width: 76px; padding: 5px 7px; }
+.tracks-title { margin: 10px 0; }
+dialog.wide input, dialog.wide select { padding: 7px 9px; }
