@@ -4,7 +4,7 @@
 
 Ambient Forge is an open-source sound scene mixer for [Owlbear Rodeo](https://www.owlbear.rodeo/). Build layered scenes from music, ambience, voices, and effects, then keep playback synchronized with everyone at your table.
 
-Review build: **0.1.11** — playback lifecycle fixes, random launch, status feedback, and buffered seamless loops. See `AUDIT_RU.md` and `INSTALL_RU.md`.
+Review build: **0.1.11** — shuffled playlists, automatic track names, status feedback, and compact scene controls. See `AUDIT_RU.md` and `INSTALL_RU.md`.
 
 ## Install
 
@@ -22,15 +22,15 @@ The `Deploy GitHub Pages` workflow tests and builds the app, then publishes a ro
 
 ## Features
 
-- Layer multiple tracks in a single sound scene.
-- Launch one random scene from a folder, or one random unmuted track from a scene.
-- Enable Seamless loop for short direct audio files (up to 120 sec / 12 MiB; CORS required).
+- Play one unmuted track per scene, in shuffled order without repeats until the playlist finishes; then start a new shuffled cycle.
+- Continue to the next track in the background even while the panel is closed, or skip using the shuffle button.
+- Fill track names from Dropbox filenames or YouTube titles (when YouTube metadata is accessible), while keeping manual editing.
 - Organize scenes into colored folders with custom emoji icons.
 - Play direct MP3, OGG, WAV, and YouTube sources.
 - Paste public Dropbox share links without manually changing their URL parameters.
 - Control master, scene, and individual track volume.
 - Pause and resume without restarting a scene.
-- Configure looping, randomized repeat delays, fade in, and fade out.
+- Configure scene fade in and fade out. Individual track looping is disabled in playlist playback.
 - Synchronize playback with the room or keep it private to the game master.
 - Import and export complete libraries as `.aforge` files.
 - Import compatible Djinni music-player libraries.

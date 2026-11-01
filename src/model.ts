@@ -60,8 +60,10 @@ export interface ActiveScene {
   scene: Scene;
   startedAt: number;
   pausedAt?: number;
-  /** A random-track launch plays only this track; omitted means layered mix. */
+  /** Selected track; playlistQueue marks a shuffled, single-track playlist. */
   trackId?: string;
+  playlistQueue?: string[];
+  playlistOwner?: string;
   instanceId?: string;
 }
 
@@ -267,6 +269,12 @@ export function validPlaybackState(value: unknown): value is PlaybackState {
       && validScene(active.scene)
       && (active.instanceId === undefined || validId(active.instanceId))
       && (active.trackId === undefined || (validId(active.trackId) && (active.scene as Scene).tracks.some(track => track.id === active.trackId)))
+      && (active.playlistOwner === undefined || validId(active.playlistOwner))
+      && (active.playlistQueue === undefined || (Array.isArray(active.playlistQueue)
+        && active.trackId !== undefined
+        && active.playlistQueue.length <= LIBRARY_LIMITS.tracksPerScene
+        && new Set(active.playlistQueue).size === active.playlistQueue.length
+        && active.playlistQueue.every(id => validId(id) && id !== active.trackId && (active.scene as Scene).tracks.some(track => track.id === id))))
       && numberInRange(active.startedAt, 0, Number.MAX_SAFE_INTEGER)
       && (active.pausedAt === undefined || numberInRange(active.pausedAt, 0, Number.MAX_SAFE_INTEGER));
   });

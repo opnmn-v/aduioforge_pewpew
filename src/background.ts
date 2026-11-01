@@ -5,7 +5,7 @@ import {
 } from "./model";
 import { BufferedAudio } from "./buffered-audio";
 import { syncAccess } from "./sync-access";
-import { activeTracks, playbackOffset } from "./playback";
+import { activeTracks, playbackOffset, playlistNext } from "./playback";
 
 interface YTPlayer {
   playVideo(): void; pauseVideo(): void; destroy(): void;
@@ -30,6 +30,7 @@ const runtimes = new Map<string, Runtime>();
 const liveRuntimes = new Set<Runtime>();
 const pendingRuntimes = new Map<string, PendingRuntime>();
 let role: "GM" | "PLAYER" = "PLAYER";
+let connectionId = "";
 let current = emptyState();
 let preview: Scene | null = null;
 let previewRevision = 0;
@@ -160,6 +161,19 @@ function onPlaying(runtime: Runtime) {
   report(runtime, "playing");
 }
 function scheduleRepeat(runtime: Runtime, remaining?: number) {
+  const active = current.active.find(item => item.scene.id === runtime.scene.id);
+  if (!runtime.preview && active?.playlistQueue && active.instanceId === runtime.instanceId
+    && !runtime.destroyed && !runtime.retiring) {
+    report(runtime, "ended");
+    if (role === "GM" && active.playlistOwner === connectionId && shouldPlay(runtime)) {
+      const next = playlistNext(active.scene, active);
+      const state = { ...current, revision: Math.max(current.revision + 1, Date.now() * 1000), updatedAt: Date.now(),
+        active: next ? current.active.map(item => item === active ? next : item) : current.active.filter(item => item !== active) };
+      reconcile(state);
+      void OBR.broadcast.sendMessage(CHANNEL, { type: "STATE", state } satisfies SyncMessage, { destination: "ALL" });
+    }
+    return;
+  }
   if (!runtime.track.loop || runtime.retiring || runtime.destroyed) { report(runtime, "ended"); return; }
   if (runtime.retry !== undefined) clearTimeout(runtime.retry);
   const min = Math.min(runtime.track.delayMin, runtime.track.delayMax);
@@ -308,14 +322,14 @@ function reconcile(state: PlaybackState) {
   // A privacy scope change must silence the player's retiring fades too.
   if (state.status === "paused") for (const runtime of [...liveRuntimes]) if (runtime.retiring) destroy(runtime);
   if (!allowed) for (const runtime of [...liveRuntimes]) if (!runtime.preview) destroy(runtime);
-  for (const runtime of [...runtimes.values()]) if (!runtime.preview && !desired.has(runtime.key)) removeRuntime(runtime);
+  for (const runtime of [...runtimes.values()]) if (!runtime.preview && !desired.has(runtime.key)) removeRuntime(runtime, !!state.active.find(item => item.scene.id === runtime.scene.id)?.playlistQueue);
   for (const [key, item] of desired) {
     const runtime = runtimes.get(key);
     const paused = item.active.pausedAt !== undefined;
     const resumingScene = !!runtime?.paused && !paused;
     const startedAtChanged = runtime?.startedAt !== item.active.startedAt;
     if (runtime && (runtime.source !== item.source || runtime.instanceId !== item.active.instanceId || (startedAtChanged && !resumingScene && !resumingGlobalPause))) {
-      removeRuntime(runtime); ensureRuntime(item.active, item.track);
+      removeRuntime(runtime, !!item.active.playlistQueue); ensureRuntime(item.active, item.track);
     } else if (!runtime) ensureRuntime(item.active, item.track);
     else {
       const loopChanged = runtime.track.loop !== item.track.loop || runtime.track.delayMin !== item.track.delayMin || runtime.track.delayMax !== item.track.delayMax;
@@ -346,6 +360,7 @@ async function unlock() {
 }
 OBR.onReady(async () => {
   loadMaster(); role = await OBR.player.getRole();
+  connectionId = await OBR.player.getConnectionId();
   const access = await syncAccess();
   OBR.player.onChange(player => { role = player.role; reconcile(current); });
   OBR.broadcast.onMessage(CHANNEL, ({ data, connectionId }) => {

@@ -7,12 +7,14 @@ import {
   Scene, SourceKind, SyncMessage, Track, emptyState, normalizeAudioUrl, starterLibrary, validLocalMessage, validPlaybackFeedback, validLibrary, validScene, validSourceUrl, validSyncMessage, youtubeId,
 } from "./model";
 import { syncAccess } from "./sync-access";
-import { activeTracks, chooseRandom, replaceFolderScene, resumePlayback } from "./playback";
+import { activeTracks, playlistNext, resumePlayback } from "./playback";
 import { parseImportedLibrary } from "./importer";
+import { trackTitle } from "./track-title";
 import { loadLibrary, saveLibrary } from "./storage";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 let role: "GM" | "PLAYER" = "PLAYER";
+let connectionId = "";
 let library: Library = starterLibrary();
 let playback = emptyState();
 let selectedFolder = "";
@@ -117,9 +119,7 @@ async function toggleScene(scene: Scene) {
   if (isActive(scene.id)) {
     await publish({ ...playback, active: playback.active.filter(item => item.scene.id !== scene.id) });
   } else {
-    const now = Date.now();
-    const resumed = playback.status === "paused" ? resumePlayback(playback, now) : playback;
-    await publish({ ...resumed, active: [...resumed.active, { scene, startedAt: now, instanceId: crypto.randomUUID() }] });
+    await randomTrack(scene);
   }
 }
 
@@ -247,7 +247,7 @@ function render() {
           <div class="library-actions"><button id="import" title="Import Ambient Forge, JSON, or Djinni library">${importIcon}<span>Import</span></button><button id="export">${exportIcon}<span>Export</span></button><button id="delete-all-scenes" class="delete-all-scenes">Delete all folders &amp; scenes</button><input id="import-file" type="file" accept=".aforge,.json,.djinni,.txt,application/json,text/plain" hidden></div>
         </aside>
         <section class="scenes">
-          <div class="scene-heading"><div><span>Scenes</span><h2>${esc(currentFolder?.name || "No folder")}</h2></div><div class="heading-actions"><button id="random-folder" class="secondary" title="Play one random scene from this folder; replace only scenes in this folder" ${scenes.length ? "" : "disabled"}>${shuffleIcon}<span>Random scene</span></button><button id="edit-folder" class="secondary" ${currentFolder ? "" : "disabled"}>Folder settings</button><button id="add-scene" class="primary" ${currentFolder ? "" : "disabled"}>${plusIcon}<span>New scene</span></button></div></div>
+          <div class="scene-heading"><div><span>Scenes</span><h2>${esc(currentFolder?.name || "No folder")}</h2></div><div class="heading-actions"><button id="edit-folder" class="secondary" ${currentFolder ? "" : "disabled"}>Folder settings</button><button id="add-scene" class="primary" ${currentFolder ? "" : "disabled"}>${plusIcon}<span>New scene</span></button></div></div>
           <div class="scene-grid">
             ${scenes.length ? scenes.map(sceneCard).join("") : `<div class="blank"><div>♫</div><strong>No sound scenes here yet</strong><span>Create a scene and add music, rain, voices, or any other sounds.</span><button id="blank-add" class="primary">${plusIcon}<span>Create the first scene</span></button></div>`}
           </div>
@@ -271,7 +271,7 @@ function sceneCard(scene: Scene) {
   return `<article class="scene-card ${active ? "active" : ""}" style="--accent:${esc(scene.color)}">
     <button class="play-scene" data-play="${scene.id}"><span class="scene-icon">${esc(scene.icon || "♫")}</span><span class="play-mark">${active ? "■" : "▶"}</span></button>
     <div class="scene-info"><strong>${esc(scene.name)}</strong><span>${scene.tracks.length} track${scene.tracks.length === 1 ? "" : "s"}${activeScene ? ` · ${esc(sceneStatus(activeScene.scene.id))}` : ""}</span></div>
-    <div class="scene-actions"><button data-random-track="${scene.id}" title="Play one random unmuted track from this scene" aria-label="Random track from ${esc(scene.name)}">${shuffleIcon}</button>${active ? `<button data-scene-pause="${scene.id}" title="${paused ? "Resume from saved position" : "Pause scene"}" ${playback.status === "paused" ? "disabled" : ""}>${paused ? "▶" : pauseIcon}</button>` : ""}<button class="edit-scene" data-edit="${scene.id}" title="Edit">✎</button><button data-delete="${scene.id}" title="Delete">×</button></div>
+    <div class="scene-actions"><button data-random-track="${scene.id}" title="Skip to the next shuffled track" aria-label="Next track in ${esc(scene.name)}">${shuffleIcon}</button>${active ? `<button data-scene-pause="${scene.id}" title="${paused ? "Resume from saved position" : "Pause scene"}" ${playback.status === "paused" ? "disabled" : ""}>${paused ? "▶" : pauseIcon}</button>` : ""}<button class="edit-scene" data-edit="${scene.id}" title="Edit">✎</button><button data-delete="${scene.id}" title="Delete">×</button></div>
     <label class="scene-volume" title="Scene volume"><span>🔉</span><input data-scene-volume="${scene.id}" aria-label="Volume for ${esc(scene.name)}" type="range" min="0" max="100" value="${scene.volume}" style="--range-value:${scene.volume}%"><em data-scene-volume-value="${scene.id}">${scene.volume}%</em></label>
   </article>`;
 }
@@ -295,12 +295,12 @@ function sceneStatus(sceneId: string): string {
 }
 
 async function randomTrack(scene: Scene) {
-  const previous = playback.active.find(item => item.scene.id === scene.id)?.trackId;
-  const track = chooseRandom(scene.tracks.filter(item => !item.muted && item.url.trim()), previous);
-  if (!track) return toast("No unmuted tracks in this scene", true);
-  const now = Date.now();
-  const resumed = playback.status === "paused" ? resumePlayback(playback, now) : playback;
-  await publish({ ...resumed, active: [...resumed.active.filter(item => item.scene.id !== scene.id), { scene, startedAt: now, trackId: track.id, instanceId: crypto.randomUUID() }] });
+  const previous = playback.active.find(item => item.scene.id === scene.id);
+  const active = playlistNext(scene, previous);
+  if (!active) return toast("No unmuted tracks in this playlist", true);
+  active.playlistOwner = connectionId;
+  const resumed = playback.status === "paused" ? resumePlayback(playback, active.startedAt) : playback;
+  await publish({ ...resumed, active: [...resumed.active.filter(item => item.scene.id !== scene.id), active] });
 }
 
 function wireCommon() {
@@ -313,12 +313,6 @@ function wireCommon() {
 }
 
 function wireGm() {
-  byId<HTMLButtonElement>("random-folder").onclick = () => {
-    const candidates = library.scenes.filter(scene => scene.folderId === selectedFolder);
-    const previous = playback.active.find(item => item.scene.folderId === selectedFolder)?.scene.id;
-    const scene = chooseRandom(candidates, previous);
-    if (scene) void publish(replaceFolderScene(playback, scene, Date.now()));
-  };
   document.querySelectorAll<HTMLButtonElement>("[data-random-track]").forEach(button => button.onclick = () => {
     const scene = library.scenes.find(item => item.id === button.dataset.randomTrack);
     if (scene) void randomTrack(scene);
@@ -424,7 +418,7 @@ function openFolderDialog(folder?: Folder) {
 }
 
 function newTrack(): Track {
-  return { id: crypto.randomUUID(), name: "New track", url: "", kind: "auto", volume: 100, muted: false, loop: true, delayMin: 0, delayMax: 0 };
+  return { id: crypto.randomUUID(), name: "New track", url: "", kind: "auto", volume: 100, muted: false, loop: false, delayMin: 0, delayMax: 0 };
 }
 
 function openSceneDialog(existing?: Scene) {
@@ -436,6 +430,9 @@ function openSceneDialog(existing?: Scene) {
     id: crypto.randomUUID(), folderId: selectedFolder, name: "New scene", icon: "♫", color: library.folders.find(f => f.id === selectedFolder)?.color || "#8b6ff7", volume: 80, fadeIn: 0, fadeOut: 3, tracks: [newTrack()],
   };
   for (const track of draft.tracks) track.url = normalizeAudioUrl(track.url);
+  const autoNames = new Map<string, string>();
+  const titleRequests = new Map<string, number>();
+  const pendingTitles = new Set<Promise<void>>();
   const dialog = dialogShell(existing ? "Edit scene" : "New sound scene", `<div id="scene-editor"></div>`, true);
   const draw = () => {
     byId<HTMLDivElement>("scene-editor").innerHTML = `
@@ -460,25 +457,36 @@ function openSceneDialog(existing?: Scene) {
       track.kind = row.querySelector<HTMLSelectElement>("[data-field=kind]")!.value as SourceKind;
       track.volume = Number(row.querySelector<HTMLInputElement>("[data-field=volume]")!.value);
       track.muted = row.querySelector<HTMLInputElement>("[data-field=muted]")!.checked;
-      track.loop = row.querySelector<HTMLInputElement>("[data-field=loop]")!.checked;
-      track.seamlessLoop = row.querySelector<HTMLInputElement>("[data-field=seamlessLoop]")!.checked;
-      track.delayMin = Number(row.querySelector<HTMLInputElement>("[data-field=delayMin]")!.value);
-      track.delayMax = Number(row.querySelector<HTMLInputElement>("[data-field=delayMax]")!.value);
+      track.loop = false; track.seamlessLoop = false; track.delayMin = 0; track.delayMax = 0;
     });
   };
   const wireDraft = () => {
     wireEmojiPickers(dialog);
     wireNumberSteppers(dialog);
-    const normalizeUrlInput = (input: HTMLInputElement) => {
-      const before = input.value.trim();
-      const normalized = normalizeAudioUrl(before);
-      if (normalized === before) return;
-      input.value = normalized;
-      toast("Dropbox link prepared for playback");
+    const updateTitle = async (input: HTMLInputElement) => {
+      const row = input.closest<HTMLElement>("[data-track-row]")!;
+      const track = draft.tracks[Number(row.dataset.trackRow)];
+      const name = row.querySelector<HTMLInputElement>('[data-field="name"]')!;
+      input.value = normalizeAudioUrl(input.value);
+      const url = input.value;
+      const request = (titleRequests.get(track.id) || 0) + 1;
+      titleRequests.set(track.id, request);
+      const nameBefore = name.value;
+      if (nameBefore.trim() && nameBefore !== "New track" && nameBefore !== autoNames.get(track.id)) return;
+      const title = await trackTitle(url);
+      if (!title || !input.isConnected || input.value !== url || name.value !== nameBefore || titleRequests.get(track.id) !== request) return;
+      name.value = title;
+      autoNames.set(track.id, title);
+      track.name = title;
     };
     document.querySelectorAll<HTMLInputElement>("[data-field=url]").forEach(input => {
-      input.addEventListener("change", () => normalizeUrlInput(input));
-      input.addEventListener("paste", () => window.setTimeout(() => normalizeUrlInput(input), 0));
+      const lookup = () => {
+        const pending = updateTitle(input);
+        pendingTitles.add(pending);
+        void pending.finally(() => pendingTitles.delete(pending));
+      };
+      input.addEventListener("change", lookup);
+      input.addEventListener("paste", () => window.setTimeout(lookup, 0));
     });
     byId<HTMLInputElement>("scene-volume-input").oninput = event => {
       const input = event.target as HTMLInputElement;
@@ -496,6 +504,8 @@ function openSceneDialog(existing?: Scene) {
     };
     document.querySelectorAll<HTMLButtonElement>("[data-remove-track]").forEach(button => button.onclick = () => { syncDraft(); draft.tracks.splice(Number(button.dataset.removeTrack), 1); draw(); });
     byId<HTMLButtonElement>("save-scene").onclick = async () => {
+      await Promise.allSettled([...pendingTitles]);
+      if (!dialog.isConnected) return;
       syncDraft(); draft.name = draft.name.trim();
       if (!draft.name) return toast("Enter a scene name", true);
       if (!draft.tracks.length || draft.tracks.some(track => !track.url)) return toast("Every track needs a URL", true);
@@ -507,13 +517,22 @@ function openSceneDialog(existing?: Scene) {
       }
       if (draft.tracks.some(track => !validSourceUrl(track.url))) return toast("Use a valid HTTP or HTTPS audio URL", true);
       if (draft.tracks.some(track => track.kind === "youtube" && !youtubeId(track.url))) return toast("Use a valid YouTube URL", true);
-      if (draft.tracks.some(track => track.seamlessLoop && (!track.loop || track.delayMin !== 0 || track.delayMax !== 0 || !!youtubeId(track.url)))) return toast("Seamless loop needs a direct audio URL, Loop enabled and both Delays set to 0.", true);
       if (!validScene(draft)) return toast("Check the scene fields and track settings", true);
       const nextLibrary: Library = existing ? { ...library, scenes: library.scenes.map(scene => scene.id === existing.id ? draft : scene) } : { ...library, scenes: [...library.scenes, draft] };
       if (!validLibrary(nextLibrary)) return toast(`A library can contain up to ${LIBRARY_LIMITS.totalTracks} total tracks.`, true);
       library = nextLibrary;
       dialog.close(); await persist();
-      if (isActive(draft.id)) await publish({ ...playback, active: playback.active.map(item => item.scene.id === draft.id ? { ...item, scene: draft, trackId: draft.tracks.some(track => track.id === item.trackId) ? item.trackId : undefined } : item) });
+      if (isActive(draft.id)) {
+        const active = playback.active.flatMap(item => {
+          if (item.scene.id !== draft.id) return [item];
+          if (item.playlistQueue && draft.tracks.some(track => track.id === item.trackId && !track.muted)) {
+            return [{ ...item, scene: draft, playlistQueue: item.playlistQueue.filter(id => draft.tracks.some(track => track.id === id && !track.muted)) }];
+          }
+          const next = playlistNext(draft);
+          return next ? [{ ...next, playlistOwner: connectionId }] : [];
+        });
+        await publish({ ...playback, active });
+      }
       if (normalizedDropboxLinks > 0) toast("Dropbox link prepared for playback");
     };
   };
@@ -523,7 +542,7 @@ function openSceneDialog(existing?: Scene) {
 function trackRow(track: Track, index: number) {
   return `<div class="track-row" data-track-row="${index}">
     <div class="track-number">${index + 1}</div><div class="track-main"><div class="track-top"><input data-field="name" maxlength="80" value="${esc(track.name)}" placeholder="Name"><select data-field="kind"><option value="auto" ${track.kind === "auto" ? "selected" : ""}>Auto</option><option value="audio" ${track.kind === "audio" ? "selected" : ""}>Audio file</option><option value="youtube" ${track.kind === "youtube" ? "selected" : ""}>YouTube</option></select><button type="button" data-remove-track="${index}">×</button></div><input data-field="url" class="url" maxlength="2048" value="${esc(track.url)}" placeholder="https://…"></div>
-    <div class="track-options"><label>Volume ${numberInput(`data-field="volume" min="0" max="100" value="${track.volume}"`, "Track volume")}</label><label class="check"><input data-field="muted" type="checkbox" ${track.muted ? "checked" : ""}> Mute</label><label class="check"><input data-field="loop" type="checkbox" ${track.loop ? "checked" : ""}> Loop</label><label class="check" title="Short direct audio only: up to 120 seconds / 12 MiB. Host must allow CORS. The source file must have no leading/trailing silence."><input data-field="seamlessLoop" type="checkbox" ${track.seamlessLoop ? "checked" : ""}> Seamless loop</label><label>Delay ${numberInput(`data-field="delayMin" min="0" max="3600" value="${track.delayMin}"`, "Minimum delay")}—${numberInput(`data-field="delayMax" min="0" max="3600" value="${track.delayMax}"`, "Maximum delay")} sec.</label></div>
+    <div class="track-options"><label>Volume ${numberInput(`data-field="volume" min="0" max="100" value="${track.volume}"`, "Track volume")}</label><label class="check"><input data-field="muted" type="checkbox" ${track.muted ? "checked" : ""}> Mute</label><span>Tracks play once; the playlist repeats in shuffled order.</span></div>
   </div>`;
 }
 
@@ -595,7 +614,7 @@ async function importLibrary(file?: File) {
 }
 
 async function startOwlbear() {
-  [role, library] = await Promise.all([OBR.player.getRole(), loadLibrary()]);
+  [role, library, connectionId] = await Promise.all([OBR.player.getRole(), loadLibrary(), OBR.player.getConnectionId()]);
   if (library.folders.some(folder => folder.name === "Мои сцены")) {
     library = { ...library, folders: library.folders.map(folder => folder.name === "Мои сцены" ? { ...folder, name: "My scenes" } : folder) };
     await saveLibrary(library);

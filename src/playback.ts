@@ -1,12 +1,8 @@
 import { ActiveScene, PlaybackState, Scene, Track } from "./model";
 
 export function activeTracks(active: ActiveScene): Track[] {
-  return active.trackId ? active.scene.tracks.filter(track => track.id === active.trackId) : active.scene.tracks;
-}
-
-export function chooseRandom<T extends { id: string }>(items: T[], previousId?: string, random = Math.random): T | undefined {
-  const candidates = items.length > 1 ? items.filter(item => item.id !== previousId) : items;
-  return candidates[Math.min(candidates.length - 1, Math.floor(random() * candidates.length))];
+  const tracks = active.trackId ? active.scene.tracks.filter(track => track.id === active.trackId) : active.scene.tracks;
+  return active.playlistQueue ? tracks.map(track => ({ ...track, loop: false, seamlessLoop: false, delayMin: 0, delayMax: 0 })) : tracks;
 }
 
 // Pause intervals overlap. Moving both clocks avoids counting a global pause twice
@@ -26,7 +22,19 @@ export function playbackOffset(startedAt: number, now: number, duration?: number
   return loop ? elapsed % duration : Math.min(elapsed, duration);
 }
 
-export function replaceFolderScene(state: PlaybackState, scene: Scene, now: number): PlaybackState {
-  const resumed = state.status === "paused" ? resumePlayback(state, now) : state;
-  return { ...resumed, active: [...resumed.active.filter(item => item.scene.folderId !== scene.folderId), { scene, startedAt: now, instanceId: crypto.randomUUID() }] };
+/** One shuffled bag per cycle; the previous track cannot lead the next cycle. */
+export function playlistNext(scene: Scene, previous?: ActiveScene, now = Date.now(), random = Math.random): ActiveScene | undefined {
+  const eligible = scene.tracks.filter(track => !track.muted && track.url.trim()).map(track => track.id);
+  if (!eligible.length) return undefined;
+  let queue = (previous?.playlistQueue ?? []).filter(id => eligible.includes(id));
+  if (!queue.length) {
+    queue = [...eligible];
+    for (let i = queue.length - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      [queue[i], queue[j]] = [queue[j], queue[i]];
+    }
+    if (queue.length > 1 && queue[0] === previous?.trackId) [queue[0], queue[1]] = [queue[1], queue[0]];
+  }
+  const [trackId, ...playlistQueue] = queue;
+  return { scene, startedAt: now, trackId, playlistQueue, playlistOwner: previous?.playlistOwner, instanceId: crypto.randomUUID() };
 }

@@ -1337,3 +1337,17 @@ dialog.wide .dialog-actions {
 .track-options { grid-column: 1 / -1; flex-wrap: wrap; gap: 10px 14px; }
 .tracks-title { gap: 14px; }
 .tracks-title > button { flex-shrink: 0; }
+
+/* Compact scene rows: retain the existing Play control, with inline details/actions. */
+.scene-grid { grid-template-columns: minmax(0, 1fr); gap: 7px; }
+.scene-card { min-height: 0; display: grid; grid-template-columns: 54px minmax(0, 1fr) auto; align-items: center; border-radius: 10px; }
+.play-scene { width: 54px; height: 54px; grid-row: 1 / 3; align-self: stretch; }
+.scene-icon { font-size: 23px; }
+.play-mark { width: 18px; height: 18px; right: 3px; bottom: 3px; font-size: 8px; }
+.scene-info { min-width: 0; padding: 8px 10px 0; flex-direction: row; align-items: center; gap: 8px; }
+.scene-info strong { min-width: 0; flex: 1; }
+.scene-info span { max-width: 55%; margin-top: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scene-actions { position: static; padding: 4px 7px 0 0; gap: 3px; }
+.scene-volume { grid-column: 2 / -1; padding: 0 10px 3px; margin: 0; }
+.scene-volume input[type="range"] { height: 16px; }
+.scene-card:hover { transform: none; }

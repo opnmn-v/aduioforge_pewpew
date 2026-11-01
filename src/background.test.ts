@@ -289,3 +289,46 @@ it("retries native audio after a rejected play promise", async () => {
   expect(sdk.messages.filter(item => item.channel === STATUS_CHANNEL).at(-1)?.data.status).toBe("blocked");
   local({ type: "UNLOCK" }); await flush(); expect(play).toHaveBeenCalledTimes(2); expect(a.paused).toBe(false);
 });
+
+describe("shuffled playlists in the background", () => {
+  async function launch(owner = "gm", youtube = false) {
+    const { playlistNext } = await import("./playback");
+    const s = scene("playlist");
+    s.tracks = [scene("a", youtube).tracks[0], scene("b", youtube).tracks[0], scene("c", youtube).tracks[0]];
+    const active = { ...playlistNext(s, undefined, Date.now(), () => 0)!, playlistOwner: owner };
+    sdk.handlers[CHANNEL]({ connectionId: "gm", data: { type: "STATE", state: { ...emptyState(), revision: 10, active: [active] } } });
+    await flush();
+    return active;
+  }
+  it("plays only one non-looping track and advances with the panel closed, without overlap or stale-ended advances", async () => {
+    const active = await launch();
+    FakeAudio.instances.find(audio => audio.src.startsWith("https:"))!.emit("loadedmetadata");
+    const playing = () => FakeAudio.instances.filter(audio => audio.src.startsWith("https:") && !audio.paused);
+    expect(playing()).toHaveLength(1);
+    const first = playing()[0];
+    expect(first.loop).toBe(false);
+    first.emit("ended"); await flush();
+    FakeAudio.instances.filter(audio => audio.src.startsWith("https:")).at(-1)!.emit("loadedmetadata");
+    expect(playing()).toHaveLength(1);
+    expect(first.paused).toBe(true);
+    const next = sdk.messages.filter(message => message.data.type === "STATE").at(-1)!.data.state;
+    expect(next.active[0].trackId).not.toBe(active.trackId);
+    expect(next.active[0].playlistQueue).toHaveLength(1);
+    const count = sdk.messages.filter(message => message.data.type === "STATE").length;
+    first.emit("ended"); await flush();
+    expect(sdk.messages.filter(message => message.data.type === "STATE")).toHaveLength(count);
+  });
+  it("does not let another GM choose a competing next track", async () => {
+    await launch("other-gm");
+    FakeAudio.instances.find(audio => audio.src.startsWith("https:"))!.emit("ended");
+    await flush();
+    expect(sdk.messages.filter(message => message.data.type === "STATE")).toHaveLength(0);
+  });
+  it("advances on YouTube ENDED as well as native audio", async () => {
+    const active = await launch("gm", true);
+    const first = FakeYouTubePlayer.instances[0]; first.onReady(); await flush();
+    first.events.onStateChange({ data: 0 }); await flush();
+    expect(sdk.messages.filter(message => message.data.type === "STATE").at(-1)!.data.state.active[0].trackId).not.toBe(active.trackId);
+    expect(first.destroyed).toBe(true);
+  });
+});

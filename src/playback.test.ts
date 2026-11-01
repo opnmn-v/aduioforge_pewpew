@@ -1,18 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { chooseRandom, playbackOffset, replaceFolderScene, resumePlayback } from "./playback";
+import { activeTracks, playlistNext, playbackOffset, resumePlayback } from "./playback";
 import { Scene, emptyState } from "./model";
 const a = { id: "a", folderId: "music" } as Scene;
-const b = { id: "b", folderId: "music" } as Scene;
-const rain = { id: "rain", folderId: "ambience" } as Scene;
 describe("random launch and clocks", () => {
-  it("avoids an immediate repeat, handles singletons and empty playlists", () => {
-    expect(chooseRandom([a, b], "a", () => 0)).toBe(b);
-    expect(chooseRandom([a], "a", () => 0)).toBe(a);
-    expect(chooseRandom([], undefined, () => 0)).toBeUndefined();
-  });
-  it("changes only the music folder, preserving rain and its position", () => {
-    const state = { ...emptyState(), active: [{ scene: a, startedAt: 1 }, { scene: rain, startedAt: 2 }] };
-    expect(replaceFolderScene(state, b, 5000).active).toEqual([{ scene: rain, startedAt: 2 }, expect.objectContaining({ scene: b, startedAt: 5000 })]);
+  it("shuffles a full cycle, excludes muted tracks, then starts another cycle without an immediate repeat", () => {
+    const tracks = ["a", "b", "c", "muted"].map(id => ({ id, url: `https://example.com/${id}.mp3`, muted: id === "muted", loop: true }));
+    const scene = { id: "playlist", tracks } as Scene;
+    let active = playlistNext(scene, undefined, 0, () => 0)!;
+    const ids = [active.trackId];
+    for (let i = 0; i < 2; i++) { active = playlistNext(scene, active, i + 1, () => 0)!; ids.push(active.trackId); }
+    expect(new Set(ids)).toEqual(new Set(["a", "b", "c"]));
+    const next = playlistNext(scene, active, 4, () => 0)!;
+    expect(next.trackId).not.toBe(active.trackId);
+    expect(activeTracks(next)).toEqual([expect.objectContaining({ id: next.trackId, loop: false, seamlessLoop: false })]);
+    expect(playlistNext({ ...scene, tracks: [] })).toBeUndefined();
+    const single = { ...scene, tracks: [scene.tracks[0]] };
+    const first = playlistNext(single)!;
+    expect(playlistNext(single, first)?.trackId).toBe(first.trackId);
   });
   it("counts overlapping scene/global pauses only once", () => {
     const state = { ...emptyState(), status: "paused" as const, pausedAt: 4000, active: [{ scene: a, startedAt: 1000, pausedAt: 3000 }] };
