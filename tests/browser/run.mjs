@@ -63,11 +63,12 @@ try {
   await panel.locator('[data-random-track="B"]').click();
   await page.waitForFunction(id => window.__messages.filter(m => m.data.type === 'STATE').at(-1).data.state.active[0].trackId !== id, beforeSkip);
   await waitAudible();
-  const expectedNext = (await active()).playlistQueue[0];
+  const remaining = (await active()).playlistQueue;
+  assert.equal(remaining.length, 2);
   const order = await panel.locator('.scene-actions').first().evaluate(node => [...node.children].map(button => button.hasAttribute('data-next-track') ? 'next' : button.hasAttribute('data-random-track') ? 'shuffle' : 'other'));
   assert.deepEqual(order.slice(0, 2), ['next', 'shuffle']);
   await panel.locator('[data-next-track="B"]').click();
-  await page.waitForFunction(id => window.__messages.filter(m => m.data.type === 'STATE').at(-1).data.state.active[0].trackId === id, expectedNext);
+  await page.waitForFunction(ids => { const active = window.__messages.filter(m => m.data.type === 'STATE').at(-1).data.state.active[0]; return ids.includes(active.trackId) && active.playlistQueue.length === ids.length - 1; }, remaining);
   await waitAudible();
   await panel.locator('#stop-all').click();
   await bg.waitForFunction(() => window.__audio.filter(a => a.src.includes('tone.wav')).every(a => a.paused));
@@ -116,5 +117,5 @@ try {
   await page.locator('#panel').evaluate(frame => frame.remove()); await endCurrent();
   await page.waitForFunction(id => window.__messages.filter(m => m.data.type === 'STATE').at(-1).data.state.active[0].instanceId !== id, beforeClose);
   await waitAudible(); assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ result: 'PASS', checks: ['compact rows', 'no Random Scene', 'one audible track', 'natural ended advances without repeats', 'master volume', 'pause/resume', 'next preserves queue; shuffle rearranges remainder', 'single-track local editor preview; switching/stopping/ending/closing/saving', 'automatic source detection; no Mute or playlist hint', 'Dropbox and YouTube names', 'manual name retained', 'closed-panel background continuation'], pageErrors: errors }));
+  console.log(JSON.stringify({ result: 'PASS', checks: ['compact rows', 'no Random Scene', 'one audible track', 'natural ended advances without repeats', 'master volume', 'pause/resume', 'next randomly consumes unplayed tracks; shuffle resets cycle', 'single-track local editor preview; switching/stopping/ending/closing/saving', 'automatic source detection; no Mute or playlist hint', 'Dropbox and YouTube names', 'manual name retained', 'closed-panel background continuation'], pageErrors: errors }));
 } finally { if (browser) await browser.close(); server.kill(); }

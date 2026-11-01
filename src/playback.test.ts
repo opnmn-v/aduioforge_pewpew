@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeTracks, playlistNext, playlistShuffle, playbackOffset, resumePlayback } from "./playback";
+import { activeTracks, playlistNext, playlistRandomNext, playlistShuffle, playbackOffset, resumePlayback } from "./playback";
 import { Scene, emptyState } from "./model";
 const a = { id: "a", folderId: "music" } as Scene;
 describe("random launch and clocks", () => {
@@ -34,15 +34,15 @@ describe("random launch and clocks", () => {
   });
 });
 
-it("Next follows the saved queue; Shuffle rearranges only its unplayed remainder", () => {
-  const scene = { id: "p", tracks: ["a", "b", "c"].map(id => ({ id, url: `https://example.com/${id}`, muted: false })) } as Scene;
-  const previous = { scene, startedAt: 1, trackId: "a", playlistQueue: ["b", "c"], playlistOwner: "gm" };
-  const next = playlistNext(scene, previous, 2, () => 0)!;
-  expect(next.trackId).toBe("b");
+it("Next chooses only unplayed tracks; Shuffle resets the entire cycle", () => {
+  const scene = { id: "p", tracks: ["a", "b", "c", "d"].map(id => ({ id, url: `https://example.com/${id}`, muted: false })) } as Scene;
+  const previous = { scene, startedAt: 1, trackId: "b", playlistQueue: ["c", "d"], playlistOwner: "gm" };
+  const next = playlistRandomNext(scene, previous, 2, () => 0)!;
+  expect(next.trackId).toBe("d");
   expect(next.playlistQueue).toEqual(["c"]);
   const shuffled = playlistShuffle(scene, previous, 2, () => 0)!;
-  expect(shuffled.trackId).toBe("c");
-  expect(shuffled.playlistQueue).toEqual(["b"]);
+  expect(shuffled.trackId).not.toBe(previous.trackId);
+  expect(new Set([shuffled.trackId, ...shuffled.playlistQueue!])).toEqual(new Set(["a", "b", "c", "d"]));
   expect(shuffled.playlistOwner).toBe("gm");
-  expect(previous.playlistQueue).toEqual(["b", "c"]);
+  expect(previous.playlistQueue).toEqual(["c", "d"]);
 });

@@ -7,7 +7,7 @@ import {
   Scene, SyncMessage, Track, emptyState, normalizeAudioUrl, starterLibrary, validLocalMessage, validPlaybackFeedback, validLibrary, validScene, validSourceUrl, validSyncMessage, youtubeId,
 } from "./model";
 import { syncAccess } from "./sync-access";
-import { activeTracks, playlistNext, playlistShuffle, resumePlayback } from "./playback";
+import { activeTracks, playlistNext, playlistRandomNext, playlistShuffle, resumePlayback } from "./playback";
 import { parseImportedLibrary } from "./importer";
 import { trackTitle } from "./track-title";
 import { loadLibrary, saveLibrary } from "./storage";
@@ -273,7 +273,7 @@ function sceneCard(scene: Scene) {
   return `<article class="scene-card ${active ? "active" : ""}" style="--accent:${esc(scene.color)}">
     <button class="play-scene" data-play="${scene.id}"><span class="scene-icon">${esc(scene.icon || "♫")}</span><span class="play-mark">${active ? "■" : "▶"}</span></button>
     <div class="scene-info"><strong>${esc(scene.name)}</strong><span>${scene.tracks.length} track${scene.tracks.length === 1 ? "" : "s"}${activeScene ? ` · ${esc(sceneStatus(activeScene.scene.id))}` : ""}</span></div>
-    <div class="scene-actions"><button data-next-track="${scene.id}" title="Next track" aria-label="Next track in ${esc(scene.name)}">⏭</button><button data-random-track="${scene.id}" title="Shuffle remaining tracks" aria-label="Shuffle tracks in ${esc(scene.name)}">${shuffleIcon}</button>${active ? `<button data-scene-pause="${scene.id}" title="${paused ? "Resume from saved position" : "Pause scene"}" ${playback.status === "paused" ? "disabled" : ""}>${paused ? "▶" : pauseIcon}</button>` : ""}<button class="edit-scene" data-edit="${scene.id}" title="Edit">✎</button><button data-delete="${scene.id}" title="Delete">×</button></div>
+    <div class="scene-actions"><button data-next-track="${scene.id}" title="Random next unplayed track" aria-label="Next track in ${esc(scene.name)}">⏭</button><button data-random-track="${scene.id}" title="Restart playlist in a new shuffled order" aria-label="Shuffle tracks in ${esc(scene.name)}">${shuffleIcon}</button>${active ? `<button data-scene-pause="${scene.id}" title="${paused ? "Resume from saved position" : "Pause scene"}" ${playback.status === "paused" ? "disabled" : ""}>${paused ? "▶" : pauseIcon}</button>` : ""}<button class="edit-scene" data-edit="${scene.id}" title="Edit">✎</button><button data-delete="${scene.id}" title="Delete">×</button></div>
     <label class="scene-volume" title="Scene volume"><span>🔉</span><input data-scene-volume="${scene.id}" aria-label="Volume for ${esc(scene.name)}" type="range" min="0" max="100" value="${scene.volume}" style="--range-value:${scene.volume}%"><em data-scene-volume-value="${scene.id}">${scene.volume}%</em></label>
   </article>`;
 }
@@ -298,7 +298,7 @@ function sceneStatus(sceneId: string): string {
 
 async function randomTrack(scene: Scene, shuffle = false) {
   const previous = playback.active.find(item => item.scene.id === scene.id);
-  const active = (shuffle ? playlistShuffle : playlistNext)(scene, previous);
+  const active = (shuffle ? playlistShuffle : playlistRandomNext)(scene, previous);
   if (!active) return toast("No unmuted tracks in this playlist", true);
   active.playlistOwner = connectionId;
   const resumed = playback.status === "paused" ? resumePlayback(playback, active.startedAt) : playback;

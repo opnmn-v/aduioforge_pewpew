@@ -23,7 +23,7 @@ The `Deploy GitHub Pages` workflow tests and builds the app, then publishes a ro
 ## Features
 
 - Play one unmuted track per scene, in shuffled order without repeats until the playlist finishes; then start a new shuffled cycle.
-- Continue to the next track in the background even while the panel is closed. Next follows the queue; Shuffle rearranges its unplayed remainder.
+- Continue to the next track in the background even while the panel is closed. Next randomly picks an unplayed track; Shuffle resets the entire playlist and starts a new shuffled cycle.
 - Preview individual tracks locally in the scene editor; the source type is detected from the URL.
 - Fill track names from Dropbox filenames or YouTube titles (when YouTube metadata is accessible), while keeping manual editing.
 - Organize scenes into colored folders with custom emoji icons.
