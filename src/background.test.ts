@@ -47,6 +47,7 @@ class FakeYouTubePlayer {
   playCalls = 0;
   duration = 60;
   currentTime = 0;
+  segments: { startSeconds: number; endSeconds: number }[] = [];
   getCurrentTime() { return this.currentTime; }
   seeks: number[] = [];
   destroyed = false;
@@ -68,6 +69,7 @@ class FakeYouTubePlayer {
   mute() { this.muted = true; }
   unMute() { this.muted = false; this.unMuteCalls++; }
   seekTo(seconds: number, _allowSeekAhead: boolean) { this.seeks.push(seconds); }
+  cueVideoById(options: { startSeconds: number; endSeconds: number }) { this.segments.push(options); this.seeks.push(options.startSeconds); this.currentTime = options.startSeconds; }
   getDuration() { return this.duration; }
 }
 
@@ -374,9 +376,23 @@ it('cuts YouTube at the specified media position, including after a pause', asyn
   const s = scene('a', true); s.tracks[0] = { ...s.tracks[0], loop: false, startTime: 7, endTime: 23 };
   local({ type: 'PREVIEW', scene: s }); await flush();
   const player = FakeYouTubePlayer.instances[0]; player.onReady(); await flush();
-  expect(player.seeks[0]).toBe(7);
+  expect(player.segments[0]).toMatchObject({ startSeconds: 7, endSeconds: 23 });
   player.currentTime = 22; vi.advanceTimersByTime(2000);
   expect(sdk.messages.at(-1)?.data.status).not.toBe('ended');
   player.currentTime = 23; vi.advanceTimersByTime(100);
   expect(sdk.messages.at(-1)?.data).toMatchObject({ preview: true, status: 'ended' });
+});
+
+it('advances a clipped playlist without a panel when the media reaches End', async () => {
+  const { playlistNext } = await import('./playback');
+  const s = scene('playlist');
+  s.tracks = ['a', 'b'].map(id => ({ ...scene(id).tracks[0], startTime: 1, endTime: 2 }));
+  const active = { ...playlistNext(s, undefined, Date.now())!, playlistOwner: 'gm' };
+  sdk.handlers[CHANNEL]({ connectionId: 'gm', data: { type: 'STATE', state: { ...emptyState(), revision: 10, active: [active] } } });
+  await flush();
+  const audio = FakeAudio.instances.find(a => a.src.startsWith('https:'))!;
+  audio.emit('loadedmetadata'); audio.currentTime = 2; audio.emit('timeupdate'); await flush();
+  const next = sdk.messages.filter(m => m.data.type === 'STATE').at(-1)!.data.state.active[0];
+  expect(next.trackId).not.toBe(active.trackId);
+  expect(audio.paused).toBe(true);
 });

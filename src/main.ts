@@ -91,7 +91,7 @@ async function persist() {
   render();
 }
 
-async function publish(next: PlaybackState) {
+async function publish(next: PlaybackState, redraw = true) {
   if (role !== "GM") return;
   const state = { ...next, version: 1 as const, revision: Math.max(playback.revision + 1, Date.now() * 1000), updatedAt: Date.now() };
   const message = { type: "STATE", state } satisfies SyncMessage;
@@ -100,7 +100,7 @@ async function publish(next: PlaybackState) {
     return;
   }
   playback = state;
-  render();
+  if (redraw) render();
   // Keep rapid A → B → stop A broadcasts in their intended order.
   const send = sendQueue.then(() => OBR.broadcast.sendMessage(CHANNEL, message, { destination: "ALL" }));
   sendQueue = send.catch(() => { toast("Audio sync failed. Check your connection and retry.", true); });
@@ -218,6 +218,7 @@ function restoreRenderView(view: RenderViewState) {
 }
 
 function render() {
+  if (document.querySelector('input[type="range"]:active')) return;
   const view = captureRenderView();
   if (!selectedFolder || !library.folders.some(folder => folder.id === selectedFolder)) selectedFolder = library.folders[0]?.id || "";
   const currentFolder = library.folders.find(folder => folder.id === selectedFolder);
@@ -350,24 +351,29 @@ function wireGm() {
     render();
   });
   document.querySelectorAll<HTMLInputElement>("[data-scene-volume]").forEach(input => {
+    let volumeTimer: number | undefined;
     input.oninput = () => {
       input.style.setProperty("--range-value", `${input.value}%`);
       const label = document.querySelector<HTMLElement>(`[data-scene-volume-value="${input.dataset.sceneVolume}"]`);
       if (label) label.textContent = `${input.value}%`;
+      clearTimeout(volumeTimer);
+      volumeTimer = window.setTimeout(() => void input.onchange?.call(input, new Event("change")), 40);
     };
     input.onchange = async () => {
+      clearTimeout(volumeTimer);
       const sceneId = input.dataset.sceneVolume!;
       const volume = Number(input.value);
       const scene = library.scenes.find(item => item.id === sceneId);
       if (!scene) return;
       const updatedScene = { ...scene, volume };
       library = { ...library, scenes: library.scenes.map(item => item.id === sceneId ? updatedScene : item) };
-      try { await saveLibrary(library); } catch { toast("Could not save volume. Export a backup before closing.", true); }
+      const snapshot = library;
       if (isActive(sceneId)) {
-        await publish({ ...playback, active: playback.active.map(item => item.scene.id === sceneId ? { ...item, scene: { ...item.scene, volume } } : item) });
+        await publish({ ...playback, active: playback.active.map(item => item.scene.id === sceneId ? { ...item, scene: { ...item.scene, volume } } : item) }, false);
       } else if (previewSceneId === sceneId) {
         await sendLocal({ type: "PREVIEW", scene: updatedScene });
       }
+      try { await saveLibrary(snapshot); } catch { toast("Could not save volume. Export a backup before closing.", true); }
     };
   });
   byId<HTMLButtonElement>("add-folder").onclick = () => openFolderDialog();

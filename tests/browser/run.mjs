@@ -57,6 +57,10 @@ try {
     await waitAudible(); cycle.push((await active()).trackId);
   }
   assert.equal(new Set(cycle).size, 3);
+  for (const value of [25, 100]) {
+    await panel.locator('[data-scene-volume="B"]').evaluate((input, value) => { input.value = String(value); input.dispatchEvent(new Event('input', { bubbles: true })); }, value);
+    await bg.waitForFunction(value => window.__audio.filter(a => a.src.includes('tone.wav') && !a.paused).some(a => Math.abs(a.volume - .8 * value / 100) < .001), value);
+  }
   for (const value of [59, 30, 0, 80]) {
     await panel.locator('#master-volume').evaluate((input, value) => { input.value = String(value); input.dispatchEvent(new Event('input', { bubbles: true })); }, value);
     await bg.waitForFunction(value => window.__audio.filter(a => a.src.includes('tone.wav') && !a.paused).every(a => Math.abs(a.volume - value / 100) < .001 && a.muted === (value === 0)), value);

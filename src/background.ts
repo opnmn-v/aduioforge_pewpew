@@ -13,6 +13,7 @@ interface YTPlayer {
   seekTo(seconds: number, allowSeekAhead: boolean): void;
   getDuration(): number;
   getCurrentTime(): number;
+  cueVideoById(options: { videoId: string; startSeconds: number; endSeconds: number }): void;
 }
 interface YTNamespace { Player: new (element: HTMLElement, options: Record<string, unknown>) => YTPlayer }
 declare global { interface Window { YT?: YTNamespace; onYouTubeIframeAPIReady?: () => void } }
@@ -105,6 +106,7 @@ function seek(runtime: Runtime) {
   const offset = start + playbackOffset(runtime.startedAt, clock(runtime), end - start, runtime.track.loop);
   runtime.sought = true;
   if (runtime.audio) runtime.audio.currentTime = offset;
+  else if (runtime.track.endTime !== undefined) runtime.player?.cueVideoById({ videoId: youtubeId(runtime.track.url)!, startSeconds: offset, endSeconds: end });
   else runtime.player?.seekTo(offset, true);
 }
 function syncPlayback(runtime: Runtime) {
@@ -166,7 +168,10 @@ function checkClip(runtime: Runtime) {
 function onPlaying(runtime: Runtime) {
   if (runtime.destroyed || runtime.retiring) return;
   if (!shouldPlay(runtime)) { runtime.playbackRequested = undefined; syncPlayback(runtime); return; }
-  if (!runtime.sought) seek(runtime);
+  if (!runtime.sought) {
+    seek(runtime);
+    if (runtime.sought && runtime.player && runtime.track.endTime !== undefined) { runtime.playbackRequested = undefined; syncPlayback(runtime); }
+  }
   if (runtime.track.endTime !== undefined && runtime.clipTimer === undefined) runtime.clipTimer = window.setInterval(() => checkClip(runtime), 100);
   if (!runtime.began) {
     runtime.began = true;
