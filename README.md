@@ -1,10 +1,8 @@
 # Ambient Forge
 
-![Ambient Forge](public/store-hero.svg)
-
 Ambient Forge is an open-source sound scene mixer for [Owlbear Rodeo](https://www.owlbear.rodeo/). Build layered scenes from music, ambience, voices, and effects, then keep playback synchronized with everyone at your table.
 
-Review build: **0.1.11** — shuffled playlists, automatic track names, status feedback, and compact scene controls. See `AUDIT_RU.md` and `INSTALL_RU.md`.
+Review build: **0.1.11** — shuffled playlists, automatic track names, status feedback, and compact scene controls. See `INSTALL_RU.md`.
 
 ## Install
 

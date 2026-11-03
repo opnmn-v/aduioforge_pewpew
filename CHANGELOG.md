@@ -7,7 +7,7 @@
 - Correct overlapping pauses, delayed repeats and finished one-shots.
 - Sender-role validation, committed/ordered/fresh library persistence, full-library track limit validation.
 - Vite security patch to 6.4.5; 45 unit tests and native Chromium audio/UI checks.
-- Not deployed upstream; live YouTube inside Owlbear remains an acceptance test. See AUDIT_RU.md.
+- Not deployed upstream; live YouTube inside Owlbear remains an acceptance test.
 
 # Changelog
 
