@@ -2,16 +2,16 @@
   "name": "owlbear-ambient-forge",
   "private": true,
   "version": "0.1.11",
-  "description": "Synchronized sound scene mixer for Owlbear Rodeo",
+  "description": "Owlbear Rodeo audio playlists; fork of Ambient Forge by Marevo",
   "author": "Marevo",
   "license": "MIT",
-  "homepage": "https://ambient-forge.marevo.workers.dev/about",
+  "homepage": "https://github.com/opnmn-v/aduioforge_pewpew",
   "repository": {
     "type": "git",
-    "url": "https://github.com/marevoteam-wq/ambient-forge.git"
+    "url": "https://github.com/opnmn-v/aduioforge_pewpew.git"
   },
   "bugs": {
-    "url": "https://github.com/marevoteam-wq/ambient-forge/issues"
+    "url": "https://github.com/opnmn-v/aduioforge_pewpew/issues"
   },
   "type": "module",
   "scripts": {
@@ -34,5 +34,10 @@
   },
   "engines": {
     "node": ">=22.12.0"
-  }
+  },
+  "contributors": [
+    {
+      "name": "opnmn-v"
+    }
+  ]
 }
